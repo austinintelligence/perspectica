@@ -1,0 +1,30 @@
+.DS_Store
+# Environment files and local secret material.
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Package-manager, framework, and local runtime output.
+**/.next/
+**/.output/
+**/.wxt/
+**/coverage/
+**/data/
+**/dist/
+**/node_modules/
+**/*.tsbuildinfo
+.turbo/
+.playwright-cli/
+tmp/
+
+# Local research corpora can contain copyrighted article text. Keep the
+# methodology and aggregate calibration summary public; rebuild the corpus
+# locally with the documented scripts when needed.
+/datasets/political-spectrum/*
+!/datasets/political-spectrum/README.md
+!/datasets/political-spectrum/summary.json
+
+# Generated presentations, screenshots, and team assets remain local unless
+# intentionally curated for a separate public release.
+/output/

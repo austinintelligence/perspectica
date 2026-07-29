@@ -1,0 +1,10 @@
+.playwright-cli/
+.next
+.output
+.wxt
+coverage
+dist
+node_modules
+output
+pnpm-lock.yaml
+tmp

@@ -1,0 +1,19 @@
+{
+  "name": "@perspectica/extraction",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@perspectica/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "happy-dom": "^18.0.0",
+    "typescript": "^5.8.0"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "name": "perspectica",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@9.15.4",
+  "engines": {
+    "node": ">=22",
+    "pnpm": ">=9.15.4"
+  },
+  "pnpm": {
+    "overrides": {
+      "postcss": "^8.5.18",
+      "sharp": "^0.35.0"
+    }
+  },
+  "scripts": {
+    "build": "pnpm -r --if-present build",
+    "dataset:spectrum:build": "pnpm --filter @perspectica/api dataset:spectrum:build",
+    "dataset:spectrum:collect": "node scripts/collect-spectrum-calibration.mjs",
+    "dataset:spectrum:summarize": "node scripts/summarize-spectrum-dataset.mjs",
+    "dataset:spectrum:validate": "node scripts/validate-spectrum-dataset.mjs",
+    "dev:api": "pnpm --filter @perspectica/api dev",
+    "dev:extension": "pnpm --filter @perspectica/extension dev",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "verify": "pnpm format:check && pnpm typecheck && pnpm test && pnpm build"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "happy-dom": "^18.0.0",
+    "prettier": "^3.6.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  }
+}

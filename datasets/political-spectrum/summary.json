@@ -1,0 +1,244 @@
+{
+  "version": "2026-07-29.1",
+  "generatedAt": "2026-07-29T15:35:17.897Z",
+  "articleCount": 100,
+  "outletCount": 10,
+  "overallMedianScore": -0.2,
+  "overallAverageScore": -0.191,
+  "labels": {
+    "center": 46,
+    "center-left": 37,
+    "center-right": 11,
+    "left": 2,
+    "right": 4
+  },
+  "topics": {
+    "economics": 17,
+    "foreign-affairs": 25,
+    "government": 41,
+    "rights-and-society": 17
+  },
+  "contentTypes": {
+    "news": 97,
+    "opinion": 3
+  },
+  "outlets": [
+    {
+      "outletId": "al-jazeera",
+      "outlet": "Al Jazeera",
+      "articleCount": 10,
+      "medianScore": -0.25,
+      "averageScore": -0.48,
+      "averageConfidence": 0.85,
+      "labels": {
+        "center": 6,
+        "center-left": 3,
+        "left": 1
+      },
+      "topics": {
+        "economics": 2,
+        "foreign-affairs": 3,
+        "government": 3,
+        "rights-and-society": 2
+      },
+      "contentTypes": {
+        "news": 10
+      }
+    },
+    {
+      "outletId": "associated-press",
+      "outlet": "Associated Press",
+      "articleCount": 10,
+      "medianScore": -0.25,
+      "averageScore": -0.25,
+      "averageConfidence": 0.805,
+      "labels": {
+        "center": 7,
+        "center-left": 3
+      },
+      "topics": {
+        "economics": 2,
+        "foreign-affairs": 3,
+        "government": 3,
+        "rights-and-society": 2
+      },
+      "contentTypes": {
+        "news": 10
+      }
+    },
+    {
+      "outletId": "bbc-news",
+      "outlet": "BBC News",
+      "articleCount": 10,
+      "medianScore": -0.15,
+      "averageScore": -0.245,
+      "averageConfidence": 0.887,
+      "labels": {
+        "center": 8,
+        "center-left": 2
+      },
+      "topics": {
+        "economics": 2,
+        "foreign-affairs": 3,
+        "government": 3,
+        "rights-and-society": 2
+      },
+      "contentTypes": {
+        "news": 10
+      }
+    },
+    {
+      "outletId": "cnn",
+      "outlet": "CNN",
+      "articleCount": 10,
+      "medianScore": -0.5,
+      "averageScore": -0.45,
+      "averageConfidence": 0.777,
+      "labels": {
+        "center": 3,
+        "center-left": 6,
+        "center-right": 1
+      },
+      "topics": {
+        "economics": 2,
+        "foreign-affairs": 3,
+        "government": 3,
+        "rights-and-society": 2
+      },
+      "contentTypes": {
+        "news": 10
+      }
+    },
+    {
+      "outletId": "fox-news",
+      "outlet": "Fox News",
+      "articleCount": 10,
+      "medianScore": 0.925,
+      "averageScore": 1.11,
+      "averageConfidence": 0.775,
+      "labels": {
+        "center-right": 6,
+        "right": 4
+      },
+      "topics": {
+        "economics": 2,
+        "foreign-affairs": 3,
+        "government": 3,
+        "rights-and-society": 2
+      },
+      "contentTypes": {
+        "news": 10
+      }
+    },
+    {
+      "outletId": "new-york-times",
+      "outlet": "The New York Times",
+      "articleCount": 10,
+      "medianScore": -0.6,
+      "averageScore": -0.48,
+      "averageConfidence": 0.744,
+      "labels": {
+        "center": 4,
+        "center-left": 6
+      },
+      "topics": {
+        "economics": 1,
+        "foreign-affairs": 3,
+        "government": 5,
+        "rights-and-society": 1
+      },
+      "contentTypes": {
+        "news": 9,
+        "opinion": 1
+      }
+    },
+    {
+      "outletId": "reuters",
+      "outlet": "Reuters",
+      "articleCount": 10,
+      "medianScore": -0.32,
+      "averageScore": -0.312,
+      "averageConfidence": 0.795,
+      "labels": {
+        "center": 5,
+        "center-left": 5
+      },
+      "topics": {
+        "foreign-affairs": 1,
+        "government": 8,
+        "rights-and-society": 1
+      },
+      "contentTypes": {
+        "news": 9,
+        "opinion": 1
+      }
+    },
+    {
+      "outletId": "south-china-morning-post",
+      "outlet": "South China Morning Post",
+      "articleCount": 10,
+      "medianScore": 0.2,
+      "averageScore": 0.055,
+      "averageConfidence": 0.809,
+      "labels": {
+        "center": 4,
+        "center-left": 3,
+        "center-right": 3
+      },
+      "topics": {
+        "economics": 2,
+        "foreign-affairs": 3,
+        "government": 3,
+        "rights-and-society": 2
+      },
+      "contentTypes": {
+        "news": 10
+      }
+    },
+    {
+      "outletId": "the-hindu",
+      "outlet": "The Hindu",
+      "articleCount": 10,
+      "medianScore": -0.125,
+      "averageScore": -0.32,
+      "averageConfidence": 0.876,
+      "labels": {
+        "center": 5,
+        "center-left": 3,
+        "center-right": 1,
+        "left": 1
+      },
+      "topics": {
+        "economics": 2,
+        "foreign-affairs": 3,
+        "government": 3,
+        "rights-and-society": 2
+      },
+      "contentTypes": {
+        "news": 9,
+        "opinion": 1
+      }
+    },
+    {
+      "outletId": "washington-post",
+      "outlet": "The Washington Post",
+      "articleCount": 10,
+      "medianScore": -0.625,
+      "averageScore": -0.54,
+      "averageConfidence": 0.779,
+      "labels": {
+        "center": 4,
+        "center-left": 6
+      },
+      "topics": {
+        "economics": 2,
+        "government": 7,
+        "rights-and-society": 1
+      },
+      "contentTypes": {
+        "news": 10
+      }
+    }
+  ],
+  "note": "Outlet aggregates describe this 10-article calibration sample. They are not permanent publication ratings."
+}
