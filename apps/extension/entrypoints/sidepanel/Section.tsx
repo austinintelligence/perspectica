@@ -33,8 +33,6 @@ export function Section({ id, title, status, error, children }: SectionProps) {
         {status === "waiting" || status === "loading" ? (
           <m.div
             className="section-loading"
-            role="status"
-            aria-live="polite"
             key="loading"
             initial={reduceMotion ? false : { opacity: 0, y: 3 }}
             animate={{ opacity: 1, y: 0 }}
@@ -62,7 +60,6 @@ export function Section({ id, title, status, error, children }: SectionProps) {
           <m.div
             className="section-content"
             key="content"
-            aria-live="polite"
             initial={reduceMotion ? false : { opacity: 0, y: 5 }}
             animate={{ opacity: 1, y: 0 }}
             transition={transition}

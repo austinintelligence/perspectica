@@ -6,7 +6,7 @@ import { resolve } from "node:path";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const OUTPUT_DIRECTORY = resolve(ROOT, "datasets/political-spectrum");
-const ENV_PATH = resolve(ROOT, "apps/api/.env.local");
+const ENV_PATH = resolve(ROOT, ".env.local");
 const START_DATE = process.env.SPECTRUM_DATASET_START_DATE ?? "2026-06-15T00:00:00.000Z";
 const END_DATE = process.env.SPECTRUM_DATASET_END_DATE ?? "2026-07-30T00:00:00.000Z";
 const RESULTS_PER_QUERY = 8;

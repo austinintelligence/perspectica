@@ -32,6 +32,7 @@ const spectrumStops = [
 export function Compass({ result }: CompassProps) {
   const [open, setOpen] = useState(false);
   const contentId = useId();
+  const summaryId = useId();
   const reduceMotion = useReducedMotion();
 
   return (
@@ -41,6 +42,7 @@ export function Compass({ result }: CompassProps) {
         type="button"
         aria-expanded={open}
         aria-controls={contentId}
+        aria-describedby={summaryId}
         aria-label={`${open ? "Hide" : "Show"} political spectrum details`}
         onClick={() => setOpen((current) => !current)}
       >
@@ -52,6 +54,10 @@ export function Compass({ result }: CompassProps) {
           <strong>{result.displayLabel}</strong>
         </span>
         <span className="toggle-mark" aria-hidden="true" />
+        <span id={summaryId} className="sr-only">
+          {open ? "Details are open." : "Details are closed."} Activate to {open ? "hide" : "show"}{" "}
+          the spectrum.
+        </span>
       </button>
 
       <AnimatePresence initial={false}>
@@ -126,6 +132,9 @@ export function Compass({ result }: CompassProps) {
                       <a href={signal.url} target="_blank" rel="noreferrer">
                         {signal.publication}
                       </a>
+                      {signal.citationKind === "search-summary" ? (
+                        <small className="search-summary-label">Web-search summary</small>
+                      ) : null}
                     </p>
                   ))}
                 </div>

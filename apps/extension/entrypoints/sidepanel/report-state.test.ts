@@ -67,6 +67,59 @@ describe("reduceAnalysisEvent", () => {
     expect(state.supporting.status).toBe("waiting");
   });
 
+  it("keeps a provisional compass visible but marks it as unreliable when research fails", () => {
+    let state = reduceAnalysisEvent(
+      beginExtraction(),
+      AnalysisEventSchema.parse({
+        type: "compass.provisional",
+        analysisId: "analysis-1",
+        emittedAt,
+        data: {
+          label: "center",
+          displayLabel: "Center",
+          score: 0,
+          confidence: "low",
+          confidenceScore: 0.42,
+          explanation: "The article framing is provisionally closest to the political center.",
+          evidence: [],
+          basis: "article-led",
+          context: {
+            status: "empty",
+            summary: "Context research is still running.",
+            signals: [],
+          },
+          influence: {
+            article: 1,
+            publication: 0,
+            journalist: 0,
+            comparableCoverage: 0,
+            topicContext: 0,
+          },
+        },
+      }),
+    );
+
+    state = reduceAnalysisEvent(
+      state,
+      AnalysisEventSchema.parse({
+        type: "section.failed",
+        analysisId: "analysis-1",
+        emittedAt,
+        data: {
+          section: "compass",
+          message: "Political research did not finish.",
+          retryable: true,
+        },
+      }),
+    );
+
+    expect(state.compass).toMatchObject({
+      status: "error",
+      data: { label: "center", basis: "article-led" },
+      error: "Political research did not finish.",
+    });
+  });
+
   it("ignores terminal events from an older analysis stream", () => {
     let state = reduceAnalysisEvent(
       beginExtraction(),
@@ -188,6 +241,10 @@ describe("reduceAnalysisEvent", () => {
 
     expect(state.phase).toBe("partial");
     expect(state.error).toBeNull();
+    expect(state.bias).toMatchObject({
+      status: "error",
+      error: "This section could not be completed. Try again.",
+    });
   });
 
   it("keeps a repeated source only in the higher-priority contradicting lane", () => {

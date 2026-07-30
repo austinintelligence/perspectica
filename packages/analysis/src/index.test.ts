@@ -207,6 +207,241 @@ describe("runAnalysis", () => {
     });
   });
 
+  it("accounts for a rejected political specialist as one compass failure", async () => {
+    const events: AnalysisEvent[] = [];
+    for await (const event of runAnalysis(request, {
+      articleLens: {
+        analyze: async () => ({ compassEvidence: [], biasCandidates: [] }),
+      },
+      research: {
+        contextBundle: async () => {
+          throw new Error("Legacy context must not run");
+        },
+        evidenceBundle: async () => {
+          throw new Error("Legacy evidence must not run");
+        },
+        analyzePoliticalContext: async () => {
+          throw new Error("Political context rejected");
+        },
+        analyzeJournalistContext: async () => emptyContextBundle.journalistContext,
+        analyzeBias: async () => ({
+          status: "empty" as const,
+          summary: "No bias.",
+          findings: [],
+        }),
+        analyzeEvidence: async () => ({
+          status: "empty" as const,
+          summary: "No evidence.",
+          sources: [],
+          emptyReason: "no-verified-evidence" as const,
+        }),
+      },
+      createId: () => "analysis-political-rejection-test",
+    })) {
+      events.push(event);
+    }
+
+    expect(
+      events.filter((event) => event.type === "section.failed" && event.data.section === "compass"),
+    ).toHaveLength(1);
+    expect(events.some((event) => event.type === "compass.ready")).toBe(false);
+    expect(events.at(-1)).toMatchObject({
+      type: "analysis.completed",
+      data: { status: "partial", failedSections: ["compass"] },
+    });
+  });
+
+  it("keeps an article-led compass when political context is successfully empty", async () => {
+    const events: AnalysisEvent[] = [];
+    const articleEvidence = {
+      id: "compass-article-led",
+      paragraphId: "paragraph-1",
+      excerpt: request.article.paragraphs[0]!.text,
+      speaker: null,
+      endorsedByArticle: true,
+      score: -1,
+      direction: "left" as const,
+      strength: 0.8,
+      relevance: 0.9,
+      explanation: "The passage favors collective provision.",
+    };
+    for await (const event of runAnalysis(request, {
+      articleLens: {
+        analyze: async () => ({ compassEvidence: [articleEvidence], biasCandidates: [] }),
+      },
+      research: {
+        contextBundle: async () => {
+          throw new Error("Legacy context must not run");
+        },
+        evidenceBundle: async () => {
+          throw new Error("Legacy evidence must not run");
+        },
+        analyzePoliticalContext: async () => ({
+          status: "empty" as const,
+          summary: "No verified political context.",
+          signals: [],
+        }),
+        analyzeJournalistContext: async () => emptyContextBundle.journalistContext,
+        analyzeBias: async () => ({
+          status: "empty" as const,
+          summary: "No bias.",
+          findings: [],
+        }),
+        analyzeEvidence: async () => ({
+          status: "empty" as const,
+          summary: "No evidence.",
+          sources: [],
+          emptyReason: "no-verified-evidence" as const,
+        }),
+      },
+      createId: () => "analysis-empty-political-context-test",
+    })) {
+      events.push(event);
+    }
+
+    expect(events.find((event) => event.type === "compass.ready")).toMatchObject({
+      data: { basis: "article-led" },
+    });
+    expect(events.some((event) => event.type === "section.failed")).toBe(false);
+    expect(events.at(-1)).toMatchObject({
+      type: "analysis.completed",
+      data: { status: "complete", failedSections: [] },
+    });
+  });
+
+  it("emits evidence in arrival order and does not duplicate unchanged snapshots", async () => {
+    const supporting = deferred<EvidenceResearchBundle["supporting"]>();
+    const contradicting = deferred<EvidenceResearchBundle["contradicting"]>();
+    const additionalContext = deferred<EvidenceResearchBundle["additionalContext"]>();
+    const events: AnalysisEvent[] = [];
+    const collection = (async () => {
+      for await (const event of runAnalysis(request, {
+        articleLens: new DemoArticleLensProvider(),
+        research: {
+          contextBundle: async () => emptyContextBundle,
+          evidenceBundle: async () => emptyEvidenceBundle,
+          analyzePoliticalContext: async () => ({
+            status: "empty",
+            summary: "No political context.",
+            signals: [],
+          }),
+          analyzeJournalistContext: async () => emptyContextBundle.journalistContext,
+          analyzeBias: async () => ({
+            status: "empty",
+            summary: "No bias.",
+            findings: [],
+          }),
+          analyzeEvidence: async (section) =>
+            section === "supporting"
+              ? supporting.promise
+              : section === "contradicting"
+                ? contradicting.promise
+                : additionalContext.promise,
+        },
+        createId: () => "analysis-arrival-order-test",
+      })) {
+        events.push(event);
+      }
+    })();
+
+    supporting.resolve(emptyEvidenceBundle.supporting);
+    await vi.waitFor(() => {
+      expect(events.filter((event) => event.type === "supporting.ready")).toHaveLength(1);
+    });
+    expect(events.some((event) => event.type === "contradicting.ready")).toBe(false);
+
+    contradicting.resolve(emptyEvidenceBundle.contradicting);
+    additionalContext.resolve(emptyEvidenceBundle.additionalContext);
+    await collection;
+
+    expect(events.filter((event) => event.type === "supporting.ready")).toHaveLength(1);
+    expect(events.some((event) => event.type === "contradicting.ready")).toBe(true);
+    expect(events.some((event) => event.type === "additionalContext.ready")).toBe(true);
+  });
+
+  it("starts every evidence specialist before a delayed Article Lens and runs each lane once", async () => {
+    const lens = deferred<Awaited<ReturnType<DemoArticleLensProvider["analyze"]>>>();
+    const calls = new Map<string, number>();
+    const events: AnalysisEvent[] = [];
+    const record = (name: string) => calls.set(name, (calls.get(name) ?? 0) + 1);
+    const collection = (async () => {
+      for await (const event of runAnalysis(request, {
+        articleLens: {
+          analyze: () => {
+            record("lens");
+            return lens.promise;
+          },
+        },
+        research: {
+          contextBundle: async () => {
+            throw new Error("Legacy context must not run");
+          },
+          evidenceBundle: async () => {
+            throw new Error("Legacy evidence must not run");
+          },
+          analyzePoliticalContext: async () => {
+            record("political");
+            return emptyContextBundle.politicalContext;
+          },
+          analyzeJournalistContext: async () => {
+            record("journalist");
+            return emptyContextBundle.journalistContext;
+          },
+          analyzeBias: async () => {
+            record("bias");
+            return {
+              status: "empty" as const,
+              summary: "No bias.",
+              findings: [],
+            };
+          },
+          analyzeEvidence: async (section) => {
+            record(section);
+            return section === "additional-context"
+              ? emptyEvidenceBundle.additionalContext
+              : emptyEvidenceBundle[section];
+          },
+        },
+        createId: () => "analysis-early-agentic-evidence-test",
+      })) {
+        events.push(event);
+      }
+    })();
+
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "supporting.ready")).toBe(true);
+      expect(events.some((event) => event.type === "contradicting.ready")).toBe(true);
+      expect(events.some((event) => event.type === "additionalContext.ready")).toBe(true);
+    });
+    expect(calls.get("supporting")).toBe(1);
+    expect(calls.get("contradicting")).toBe(1);
+    expect(calls.get("additional-context")).toBe(1);
+    expect(calls.get("bias")).toBeUndefined();
+    expect(calls.get("political")).toBeUndefined();
+    expect(events.some((event) => event.type === "compass.ready")).toBe(false);
+
+    lens.resolve({
+      compassEvidence: [],
+      biasCandidates: [],
+      dossier: createFallbackDossier(request),
+    });
+    await collection;
+
+    expect(Object.fromEntries(calls)).toMatchObject({
+      lens: 1,
+      journalist: 1,
+      supporting: 1,
+      contradicting: 1,
+      "additional-context": 1,
+      political: 1,
+      bias: 1,
+    });
+    expect(events.at(-1)).toMatchObject({
+      type: "analysis.completed",
+      data: { status: "complete", failedSections: [] },
+    });
+  });
+
   it("removes reader copy for bias candidates rejected by exact-article validation", async () => {
     const validFinding = {
       id: "bias-valid",
@@ -396,7 +631,12 @@ describe("runAnalysis", () => {
       events.push(event);
     }
 
-    expect(events.find((event) => event.type === "supporting.ready")).toMatchObject({
+    expect(
+      events
+        .slice()
+        .reverse()
+        .find((event) => event.type === "supporting.ready"),
+    ).toMatchObject({
       data: {
         sources: [{ id: "unique-support" }],
         readerCopy: {
@@ -601,6 +841,41 @@ describe("runAnalysis", () => {
       "journalistContext.ready",
       "compass.ready",
     ]);
+  });
+
+  it("turns a delayed political-context lane failure into a terminal compass failure", async () => {
+    const context = deferred<ContextResearchBundle>();
+    const events: AnalysisEvent[] = [];
+    const collection = (async () => {
+      for await (const event of runAnalysis(request, {
+        articleLens: new DemoArticleLensProvider(),
+        research: {
+          contextBundle: () => context.promise,
+          evidenceBundle: async () => emptyEvidenceBundle,
+        },
+        createId: () => "analysis-political-context-failure-test",
+      })) {
+        events.push(event);
+      }
+    })();
+
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "compass.provisional")).toBe(true);
+    });
+    context.resolve({
+      ...emptyContextBundle,
+      failures: { politicalContext: new Error("Political research failed") },
+    });
+    await collection;
+
+    expect(
+      events.filter((event) => event.type === "section.failed" && event.data.section === "compass"),
+    ).toHaveLength(1);
+    expect(events.some((event) => event.type === "compass.ready")).toBe(false);
+    expect(events.at(-1)).toMatchObject({
+      type: "analysis.completed",
+      data: { status: "partial", failedSections: ["compass"] },
+    });
   });
 });
 

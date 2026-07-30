@@ -1,67 +1,117 @@
+import { useEffect, useState } from "react";
 import { AnimatePresence, m, useReducedMotion } from "motion/react";
 import type { LoadStatus, ReportState } from "./report-state";
+import { formatElapsedMs } from "./streaming";
 
-const activeStatuses: LoadStatus[] = ["loading", "waiting"];
+const terminalStatuses: LoadStatus[] = ["ready", "empty", "error"];
+
+const laneLabels: Readonly<Record<string, string>> = {
+  compass: "Comparing related coverage",
+  bias: "Reading article framing",
+  journalistContext: "Checking journalist context",
+  supporting: "Checking supporting evidence",
+  contradicting: "Checking contradicting evidence",
+  additionalContext: "Adding useful context",
+};
 
 export interface AnalysisProgressState {
   label: string;
   detail: string;
-  progress: number;
+  completed: number;
+  total: number;
+  elapsedMs: number;
 }
 
 function isComplete(status: LoadStatus): boolean {
-  return status === "ready" || status === "empty" || status === "error";
+  return terminalStatuses.includes(status);
+}
+
+function elapsedSince(startedAt: string | null, now: number): number {
+  if (!startedAt) return 0;
+  const timestamp = Date.parse(startedAt);
+  return Number.isFinite(timestamp) ? Math.max(0, now - timestamp) : 0;
 }
 
 /**
- * Keeps the status language tied to real pipeline milestones rather than a
- * timer. It is intentionally concise: the report remains the focus.
+ * Derives copy from actual extraction and section events. There is deliberately
+ * no timer-based percentage: a lane is counted only after its result arrives.
  */
-export function getAnalysisProgress(state: ReportState): AnalysisProgressState | null {
+export function getAnalysisProgress(
+  state: ReportState,
+  now = Date.now(),
+): AnalysisProgressState | null {
   if (state.phase !== "extracting" && state.phase !== "analyzing") return null;
 
   if (state.phase === "extracting" || !state.metadata) {
-    return { label: "Reading the article", detail: "Preparing the report", progress: 8 };
+    return {
+      label: "Reading the article",
+      detail: "Preparing the report",
+      completed: 0,
+      total: 6,
+      elapsedMs: elapsedSince(state.startedAt, now),
+    };
   }
 
-  const sections = [
-    state.compass.status,
-    state.bias.status,
-    state.journalistContext.status,
-    state.supporting.status,
-    state.contradicting.status,
-    state.additionalContext.status,
-  ];
-  const completed = sections.filter(isComplete).length;
+  const lanes = [
+    ["compass", state.compass.status],
+    ["bias", state.bias.status],
+    ["journalistContext", state.journalistContext.status],
+    ["supporting", state.supporting.status],
+    ["contradicting", state.contradicting.status],
+    ["additionalContext", state.additionalContext.status],
+  ] as const;
+  const completed = lanes.filter(([, status]) => isComplete(status)).length;
+  const activeLane = lanes.find(([, status]) => status === "loading")?.[0];
+  const waiting = lanes.filter(([, status]) => status === "waiting").length;
 
-  if (activeStatuses.includes(state.compass.status) && completed === 0) {
+  if (activeLane && completed === 0 && activeLane === "compass") {
     return {
       label: "Comparing related coverage",
       detail: "Researching independent sources",
-      progress: 18,
+      completed,
+      total: lanes.length,
+      elapsedMs: elapsedSince(state.startedAt, now),
     };
   }
-  if (completed <= 2) {
+  if (activeLane && completed <= 2) {
     return {
-      label: "Checking source context",
-      detail: "Reviewing publication and reporter context",
-      progress: 24 + completed * 12,
+      label: laneLabels[activeLane] ?? "Checking source context",
+      detail: `${completed} of ${lanes.length} sections ready`,
+      completed,
+      total: lanes.length,
+      elapsedMs: elapsedSince(state.startedAt, now),
     };
   }
   return {
-    label: "Preparing the report",
-    detail: "Organizing the evidence found so far",
-    progress: 56 + completed * 7,
+    label: waiting > 0 ? "Preparing research" : "Preparing the report",
+    detail: `${completed} of ${lanes.length} sections ready`,
+    completed,
+    total: lanes.length,
+    elapsedMs: elapsedSince(state.startedAt, now),
   };
 }
 
-export function AnalysisProgress({ state }: { state: ReportState }) {
+interface AnalysisProgressProps {
+  state: ReportState;
+  onCancel?: () => void;
+}
+
+export function AnalysisProgress({ state, onCancel }: AnalysisProgressProps) {
   const progress = getAnalysisProgress(state);
   const reduceMotion = useReducedMotion();
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!progress) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [progress?.label, state.startedAt]);
+
+  const liveProgress = progress ? getAnalysisProgress(state, now) : null;
 
   return (
     <AnimatePresence initial={false}>
-      {progress ? (
+      {liveProgress ? (
         <m.div
           className="analysis-progress"
           role="status"
@@ -75,23 +125,35 @@ export function AnalysisProgress({ state }: { state: ReportState }) {
           <span className="analysis-progress-copy">
             <AnimatePresence initial={false} mode="wait">
               <m.strong
-                key={progress.label}
+                key={liveProgress.label}
                 initial={reduceMotion ? false : { opacity: 0, y: 3 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -2 }}
                 transition={{ duration: reduceMotion ? 0 : 0.16, ease: "easeOut" }}
               >
-                {progress.label}
+                {liveProgress.label}
               </m.strong>
             </AnimatePresence>
-            <small>{progress.detail}</small>
+            <small>
+              {liveProgress.detail} · {formatElapsedMs(liveProgress.elapsedMs)}
+            </small>
           </span>
           <span className="analysis-progress-track" aria-hidden="true">
             <m.span
-              animate={{ scaleX: progress.progress / 100 }}
-              transition={{ duration: reduceMotion ? 0 : 0.42, ease: "easeOut" }}
+              className="analysis-progress-indicator"
+              animate={reduceMotion ? { opacity: 1 } : { opacity: [0.55, 1, 0.55] }}
+              transition={
+                reduceMotion
+                  ? { duration: 0 }
+                  : { duration: 1.4, repeat: Infinity, ease: "easeInOut" }
+              }
             />
           </span>
+          {onCancel ? (
+            <button className="analysis-progress-cancel" type="button" onClick={onCancel}>
+              Stop
+            </button>
+          ) : null}
         </m.div>
       ) : null}
     </AnimatePresence>

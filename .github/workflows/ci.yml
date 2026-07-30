@@ -39,5 +39,8 @@ jobs:
       - name: Verify
         run: pnpm verify
 
+      - name: Inspect production extension package
+        run: pnpm check:extension-package
+
       - name: Audit production dependencies
         run: pnpm audit --prod --audit-level=high

@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { m, useReducedMotion } from "motion/react";
 import type { AnalysisModel, AnalysisPreferences } from "@perspectica/contracts";
+import type { SearchProviderKind } from "../../src/runtime/messages";
 import { BrandHeader } from "./BrandHeader";
 import { ChevronDownIcon } from "./Icons";
 import { ANALYSIS_MODELS, REASONING_EFFORTS } from "./preferences";
+import { clearExaApiKey, saveExaApiKey, testExaApiKey, testSearchProvider } from "./api";
 
 interface SettingsScreenProps {
   authenticated: boolean;
@@ -11,6 +13,12 @@ interface SettingsScreenProps {
   onChange: (preferences: AnalysisPreferences) => void;
   onClose: () => void;
   onDisconnect: () => Promise<void>;
+  availableModels?: string[];
+  searchProvider?: SearchProviderKind;
+  hasExaKey?: boolean;
+  onSearchProviderChange?: (provider: SearchProviderKind) => Promise<void>;
+  onExaKeySaved?: () => void;
+  onExaKeyRemoved?: () => void;
 }
 
 export function SettingsScreen({
@@ -19,10 +27,76 @@ export function SettingsScreen({
   onChange,
   onClose,
   onDisconnect,
+  availableModels = [],
+  searchProvider,
+  hasExaKey = false,
+  onSearchProviderChange,
+  onExaKeySaved,
+  onExaKeyRemoved,
 }: SettingsScreenProps) {
   const [disconnecting, setDisconnecting] = useState(false);
+  const [exaKey, setExaKey] = useState("");
+  const [providerStatus, setProviderStatus] = useState<string | null>(null);
   const reduceMotion = useReducedMotion();
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  const titleId = useId();
+  onCloseRef.current = onClose;
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    if (!dialog) return undefined;
+
+    const focusable = () =>
+      Array.from(
+        dialog.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((element) => !element.hasAttribute("aria-hidden"));
+
+    const first = focusable()[0];
+    queueMicrotask(() => (first ?? dialog).focus());
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const elements = focusable();
+      if (elements.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const current = document.activeElement;
+      const index = elements.indexOf(current as HTMLElement);
+      const next = event.shiftKey
+        ? elements[(index <= 0 ? elements.length : index) - 1]
+        : elements[(index + 1) % elements.length];
+      if (
+        index === -1 ||
+        (!event.shiftKey && index === elements.length - 1) ||
+        (event.shiftKey && index === 0)
+      ) {
+        event.preventDefault();
+        next?.focus();
+      }
+    };
+    dialog.addEventListener("keydown", onKeyDown);
+    return () => {
+      dialog.removeEventListener("keydown", onKeyDown);
+      previous?.focus();
+    };
+  }, []);
   const selectedModel = ANALYSIS_MODELS.find((model) => model.value === preferences.model);
+  const selectableModels = ANALYSIS_MODELS.filter(
+    (model) => availableModels.length === 0 || availableModels.includes(model.value),
+  );
+  if (!selectableModels.some((model) => model.value === preferences.model) && selectedModel) {
+    selectableModels.unshift(selectedModel);
+  }
 
   const disconnect = async () => {
     setDisconnecting(true);
@@ -36,9 +110,12 @@ export function SettingsScreen({
 
   return (
     <m.div
+      ref={dialogRef}
       className="settings-layer atmosphere-page"
       role="dialog"
       aria-modal="true"
+      aria-labelledby={titleId}
+      tabIndex={-1}
       initial={reduceMotion ? false : { opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
       exit={reduceMotion ? undefined : { opacity: 0, y: 8 }}
@@ -48,7 +125,7 @@ export function SettingsScreen({
       <main className="settings-main">
         <header className="settings-intro">
           <p className="eyebrow">Preferences</p>
-          <h1>Settings</h1>
+          <h1 id={titleId}>Settings</h1>
           <p>Choose how Perspectica analyzes articles.</p>
         </header>
 
@@ -67,7 +144,7 @@ export function SettingsScreen({
                 })
               }
             >
-              {ANALYSIS_MODELS.map((model) => (
+              {selectableModels.map((model) => (
                 <option value={model.value} key={model.value}>
                   {model.label}
                 </option>
@@ -77,6 +154,103 @@ export function SettingsScreen({
           </div>
           <p className="preference-help">{selectedModel?.description}</p>
         </section>
+
+        {searchProvider && onSearchProviderChange ? (
+          <section className="preference-section">
+            <span className="preference-label">Web research</span>
+            <div className="reasoning-control" role="group" aria-label="Search provider">
+              {(["exa", "chatgpt"] as const).map((provider) => (
+                <button
+                  type="button"
+                  aria-pressed={searchProvider === provider}
+                  className={searchProvider === provider ? "selected" : undefined}
+                  onClick={() => {
+                    setProviderStatus(`Testing ${provider === "exa" ? "Exa" : "ChatGPT"}…`);
+                    void onSearchProviderChange(provider).then(
+                      () =>
+                        setProviderStatus(
+                          provider === "exa" ? "Exa connected" : "ChatGPT search connected",
+                        ),
+                      (cause: unknown) =>
+                        setProviderStatus(
+                          cause instanceof Error
+                            ? cause.message
+                            : "The search provider could not connect.",
+                        ),
+                    );
+                  }}
+                  key={provider}
+                >
+                  {provider === "exa" ? "Exa" : "ChatGPT"}
+                </button>
+              ))}
+            </div>
+            {searchProvider === "exa" ? (
+              <div className="settings-provider-key">
+                <input
+                  type="password"
+                  value={exaKey}
+                  autoComplete="off"
+                  placeholder={hasExaKey ? "Replace saved Exa key" : "Enter Exa API key"}
+                  onChange={(event) => setExaKey(event.target.value)}
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setProviderStatus("Testing…");
+                    void testExaApiKey(exaKey.trim())
+                      .then(() => saveExaApiKey(exaKey.trim()))
+                      .then(() => {
+                        setExaKey("");
+                        setProviderStatus("Exa connected");
+                        onExaKeySaved?.();
+                      })
+                      .catch((cause: unknown) =>
+                        setProviderStatus(
+                          cause instanceof Error ? cause.message : "Exa could not connect.",
+                        ),
+                      );
+                  }}
+                  disabled={!exaKey.trim()}
+                >
+                  Save and test
+                </button>
+                {hasExaKey ? (
+                  <button
+                    type="button"
+                    className="provider-remove-key"
+                    onClick={() => {
+                      setProviderStatus("Removing key…");
+                      void clearExaApiKey().then(
+                        () => {
+                          setProviderStatus("Exa key removed");
+                          setExaKey("");
+                          onExaKeyRemoved?.();
+                        },
+                        (cause: unknown) =>
+                          setProviderStatus(
+                            cause instanceof Error
+                              ? cause.message
+                              : "The Exa key could not be removed.",
+                          ),
+                      );
+                    }}
+                  >
+                    Remove key
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+            <p className="preference-help">
+              {providerStatus ??
+                (searchProvider === "exa"
+                  ? hasExaKey
+                    ? "An encrypted Exa key is saved on this device."
+                    : "Add an Exa key before the next analysis."
+                  : "Native search is checked against your connected ChatGPT account.")}
+            </p>
+          </section>
+        ) : null}
 
         <section className="preference-section">
           <span className="preference-label" id="reasoning-label">

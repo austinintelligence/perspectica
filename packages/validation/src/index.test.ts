@@ -1,7 +1,13 @@
-import type { ArticleDocument, BiasFinding, CompassEvidence } from "@perspectica/contracts";
+import type {
+  ArticleDocument,
+  BiasFinding,
+  CompassEvidence,
+  ExternalSource,
+} from "@perspectica/contracts";
 import { describe, expect, it } from "vitest";
 import {
   buildSourceList,
+  deduplicateExternalSources,
   excerptMatchesParagraph,
   validateBiasFindings,
   validateCompassEvidence,
@@ -251,6 +257,34 @@ describe("section validation", () => {
 
   it("deduplicates original article sources", () => {
     expect(buildSourceList(article).sources).toHaveLength(1);
+  });
+
+  it("deduplicates source URLs after canonical tracking normalization", () => {
+    const source = (url: string, id: string): ExternalSource =>
+      ({
+        id,
+        claimId: null,
+        title: "A source",
+        publication: "Example",
+        publishedAt: null,
+        excerpt: "A source excerpt.",
+        relationship: "supports",
+        relationshipExplanation: "It supports the claim.",
+        url,
+        sourceType: "independent-reporting",
+        publicationContext: null,
+      }) as ExternalSource;
+
+    expect(
+      deduplicateExternalSources(
+        [
+          source("https://EXAMPLE.com/report/?utm_source=feed#read", "first"),
+          source("https://example.com/report", "duplicate"),
+          source("https://example.com/other", "other"),
+        ],
+        3,
+      ).map((entry) => entry.id),
+    ).toEqual(["first", "other"]);
   });
 
   it("turns noisy article links into a compact works-cited list", () => {

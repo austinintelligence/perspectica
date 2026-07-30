@@ -26,8 +26,9 @@ export interface ArticleMetadata {
 }
 
 export interface ReportState {
-  phase: "idle" | "extracting" | "analyzing" | "complete" | "partial" | "error";
+  phase: "idle" | "extracting" | "analyzing" | "complete" | "partial" | "error" | "cancelled";
   analysis: AnalysisMetadata | null;
+  startedAt: string | null;
   metadata: ArticleMetadata | null;
   sourceList: SectionState<SourceListResult>;
   compass: SectionState<CompassResult>;
@@ -49,6 +50,7 @@ export function createInitialReportState(): ReportState {
   return {
     phase: "idle",
     analysis: null,
+    startedAt: null,
     metadata: null,
     sourceList: waiting(),
     compass: waiting(),
@@ -69,6 +71,10 @@ export function failReport(state: ReportState, message: string): ReportState {
   return { ...state, phase: "error", error: message };
 }
 
+export function cancelReport(state: ReportState): ReportState {
+  return { ...state, phase: "cancelled", error: null };
+}
+
 function loaded<T extends { status: "ready" | "empty" }>(data: T): SectionState<T> {
   return { status: data.status, data, error: null };
 }
@@ -79,6 +85,15 @@ function loading<T>(section: SectionState<T>): SectionState<T> {
 
 function failed<T>(section: SectionState<T>, message: string): SectionState<T> {
   return { ...section, status: "error", error: message };
+}
+
+function failIncompleteSection<T>(
+  section: SectionState<T>,
+  message = "This section could not be completed. Try again.",
+): SectionState<T> {
+  return section.status === "ready" || section.status === "empty"
+    ? section
+    : failed(section, section.error ?? message);
 }
 
 function sourceUrlKey(value: string): string {
@@ -150,6 +165,7 @@ export function reduceAnalysisEvent(state: ReportState, event: AnalysisEvent): R
         ...state,
         phase: "analyzing",
         analysis: event.data,
+        startedAt: event.data.startedAt,
         compass: loading(state.compass),
         bias: loading(state.bias),
         journalistContext: loading(state.journalistContext),
@@ -245,9 +261,34 @@ export function reduceAnalysisEvent(state: ReportState, event: AnalysisEvent): R
       }
     }
     case "analysis.completed":
-      return {
-        ...state,
-        phase: event.data.status === "partial" ? "partial" : "complete",
-      };
+      return event.data.status === "partial"
+        ? {
+            ...state,
+            phase: "partial",
+            compass: event.data.failedSections.includes("compass")
+              ? failIncompleteSection(state.compass)
+              : state.compass,
+            bias: event.data.failedSections.includes("bias")
+              ? failIncompleteSection(state.bias)
+              : state.bias,
+            journalistContext: event.data.failedSections.includes("journalist-context")
+              ? failIncompleteSection(state.journalistContext)
+              : state.journalistContext,
+            supporting: event.data.failedSections.includes("supporting")
+              ? failIncompleteSection(state.supporting)
+              : state.supporting,
+            contradicting: event.data.failedSections.includes("contradicting")
+              ? failIncompleteSection(state.contradicting)
+              : state.contradicting,
+            additionalContext: event.data.failedSections.includes("additional-context")
+              ? failIncompleteSection(state.additionalContext)
+              : state.additionalContext,
+          }
+        : {
+            ...state,
+            phase: "complete",
+          };
   }
+
+  return state;
 }

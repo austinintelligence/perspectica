@@ -4,7 +4,7 @@
 
 Keep the existing compass and one-pass specialist architecture while making every
 visible research statement concise, useful, and traceable to evidence that
-survived server validation.
+survived pipeline validation.
 
 ## Evidence-first reader copy
 
@@ -12,7 +12,7 @@ survived server validation.
   matches an accepted source.
 - If validation removes a source referenced by generated copy, the matching
   sentence is removed too.
-- When all generated sentences lose their sources, the server builds short
+- When all generated sentences lose their sources, the pipeline builds short
   fallback copy from the accepted source relationships instead of showing an
   uncited claim or reverting to the long source-card presentation.
 - If validation removes any generated sentence, the section receives a neutral

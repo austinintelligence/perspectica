@@ -20,7 +20,7 @@ function compact(value: string, maxLength: number): string {
 }
 
 /**
- * Keeps reader-facing prose aligned with the evidence that survived server
+ * Keeps reader-facing prose aligned with the evidence that survived pipeline
  * validation. A removed source must also remove the sentence that cited it.
  */
 export function reconcileReaderCopy(

@@ -61,17 +61,19 @@ The connection is intentionally removed by:
 
 ### Article access
 
-Perspectica analyzes only the active tab after the user explicitly opens or
-invokes the extension. It does not run a permanent content script on every
-page. The extension requests temporary access with `activeTab`, injects the
-packaged extractor, and immediately returns a bounded article payload.
+Perspectica analyzes only the active tab after the user explicitly requests an
+analysis. It does not run a permanent content script on every page. During
+onboarding, the extension explains and requests optional all-sites access from a
+direct user gesture. Chrome remembers an approved grant so navigation does not
+revoke access. Perspectica injects the packaged extractor on demand and
+immediately returns a bounded article payload.
 
 ## Runtime Architecture
 
 ```text
 Active article tab
     |
-    | activeTab + scripting, on demand
+    | remembered optional all-sites grant + scripting, on demand
     v
 Packaged extractor
     |
@@ -368,20 +370,23 @@ phase timings, and status, never credentials or full article text.
 
 Target permissions:
 
-- `activeTab`
 - `scripting`
 - `storage`
 - `offscreen`
 - `sidePanel`
 
-Target host permissions are restricted to the exact ChatGPT authorization/Codex
-and Exa HTTPS origins required by the selected providers. Perspectica removes
-the permanent all-site content script, localhost permissions, cookies, server
-CORS, and hardcoded development extension key from store builds.
+The target optional host permission is `<all_urls>`. It is requested once from
+the onboarding UI and remembered by Chrome so the extension can analyze a newly
+opened article while the side panel remains open. Perspectica still omits a
+permanent all-site content script: the extractor runs only after the user starts
+an analysis. Store builds also remove localhost endpoints, cookies, server CORS,
+and the hardcoded development extension key.
 
 The Web Store privacy disclosure states:
 
 - article text is sent to the user's selected AI/search providers;
+- the extension can read standard websites but does so only for a user-requested
+  active-tab analysis;
 - authentication and provider credentials are stored locally;
 - no article or account data is sent to Perspectica-operated servers;
 - the user can disconnect and erase local provider credentials at any time.

@@ -80,6 +80,60 @@ describe("AI SDK Article Lens", () => {
     expect(prompt).not.toContain(request.article.canonicalUrl);
   });
 
+  it("samples the beginning, middle, and end of an oversized article within the budget", () => {
+    const paragraphs = Array.from({ length: 9 }, (_, index) => ({
+      id: `long-${index}`,
+      index,
+      kind: "paragraph" as const,
+      speaker: null,
+      text: `REGION-${index} ${String(index).repeat(9_990)}`,
+    }));
+    const prompt = buildArticleLensPrompt({
+      ...request,
+      article: {
+        ...request.article,
+        paragraphs,
+      },
+    });
+    const serialized = prompt.match(/<article-paragraphs>\n(.+)\n<\/article-paragraphs>/)?.[1];
+    const diagnostics = prompt.match(/Article context selection: (\{.+\})/)?.[1];
+    expect(serialized).toBeDefined();
+    expect(diagnostics).toBeDefined();
+
+    const selected = JSON.parse(serialized!) as Array<{
+      id: string;
+      text: string;
+      selectionRegion: string;
+      textTruncated: boolean;
+    }>;
+    const selectionDiagnostics = JSON.parse(diagnostics!) as {
+      strategy: string;
+      selectedCharacterCount: number;
+      omittedParagraphCount: number;
+      truncatedParagraphCount: number;
+    };
+
+    expect(selected.some((paragraph) => paragraph.id === "long-0")).toBe(true);
+    expect(selected.some((paragraph) => paragraph.id === "long-4")).toBe(true);
+    expect(selected.some((paragraph) => paragraph.id === "long-8")).toBe(true);
+    expect(new Set(selected.map((paragraph) => paragraph.selectionRegion))).toEqual(
+      new Set(["beginning", "middle", "end"]),
+    );
+    expect(selected.reduce((sum, paragraph) => sum + paragraph.text.length, 0)).toBeLessThanOrEqual(
+      48_000,
+    );
+    expect(selectionDiagnostics).toMatchObject({
+      strategy: "beginning-middle-end",
+      selectedCharacterCount: expect.any(Number),
+      omittedParagraphCount: expect.any(Number),
+      truncatedParagraphCount: expect.any(Number),
+    });
+    expect(selectionDiagnostics.truncatedParagraphCount).toBeGreaterThan(0);
+    expect(prompt).toContain(
+      "The supplied paragraphs deliberately sample its beginning, middle, and end.",
+    );
+  });
+
   it("enforces the bounded structured contract", () => {
     expect(
       ArticleLensOutputSchema.safeParse({

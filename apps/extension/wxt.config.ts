@@ -1,32 +1,36 @@
 import { defineConfig } from "wxt";
 
-function configuredApiHostPermission(): string[] {
-  const configured = process.env.WXT_API_BASE_URL?.trim();
-  if (!configured) return [];
-
-  let url: URL;
-  try {
-    url = new URL(configured);
-  } catch {
-    throw new Error("WXT_API_BASE_URL must be an absolute http(s) URL.");
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error("WXT_API_BASE_URL must use http or https.");
-  }
-  return [`${url.protocol}//${url.host}/*`];
-}
-
 export default defineConfig({
   modules: ["@wxt-dev/module-react"],
+  // Use the developer's existing Chrome profile instead of launching a
+  // separate WXT-managed browser. WXT intentionally keeps live development in
+  // `.output/chrome-mv3-dev` and production in `.output/chrome-mv3`: a dev
+  // build imports from the local Vite server and must never overwrite the
+  // self-contained unpacked production build.
+  webExt: {
+    disabled: true,
+  },
   manifest: {
     name: "Perspectica",
     description: "See the article's political framing, bias signals, and evidence.",
     version: "0.1.0",
-    key: "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAlteXkwfojyCDERbAR/WNVJrug3V3/zTJDSiVkRSa2RCzTZIBilhFhFx4yzi2T7azHK5r4ms5h9XMGzJ+UOfiUi8bW1M7BTR4rntFVCLuxMxIVLHLfBjaSekLHnbSUO+DlC7i0yOBAa4ApTrUQRJYuIsCUdEwy4yc0etvnlhf3dphgXeqnZw6AhZlEsZHgEnWDj9Y0lJQ+HyEKB9Xs0bygoQfvl1mSEMWfy/SwZ43aVBgx1anhtDRbieGxoM+opSSitl4kMiQ7/TOzQ2ZIz/fuKFQa5PXnluGutPzW6JDhBZ/jHDcfn8fiAhm2DZYuiR4Ki2UDEfI7H8ziI70v5EGnQIDAQAB",
-    permissions: ["activeTab", "tabs"],
-    host_permissions: ["http://localhost:3000/*", ...configuredApiHostPermission()],
+    permissions: ["scripting", "storage", "offscreen"],
+    // Onboarding requests this optional grant from a direct user gesture.
+    // Chrome remembers it so article extraction works after navigation.
+    // Extraction remains on demand; no persistent content script is installed.
+    optional_host_permissions: ["https://auth.openai.com/*", "https://chatgpt.com/*", "<all_urls>"],
     action: {
       default_title: "Open Perspectica",
+      default_icon: {
+        16: "icon-16.png",
+        32: "icon-32.png",
+      },
+    },
+    icons: {
+      16: "icon-16.png",
+      32: "icon-32.png",
+      48: "icon-48.png",
+      128: "icon-128.png",
     },
   },
 });

@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { describe, expect, it } from "vitest";
-import { extractArticleDocument } from "./index";
+import { ArticleExtractionError, createArticleFingerprint, extractArticleDocument } from "./index";
 
 describe("extractArticleDocument", () => {
   it("extracts ordered article content, metadata, and original links", () => {
@@ -73,7 +73,7 @@ describe("extractArticleDocument", () => {
     const article = extractArticleDocument(document, "https://www.bbc.com/news/articles/example");
 
     expect(article.author).toBe("Olivia Ireland");
-    expect(article.extraction.extractorVersion).toBe("dom-v3");
+    expect(article.extraction.extractorVersion).toBe("dom-v5");
   });
 
   it("removes repeated byline prefixes and a duplicated publication suffix", () => {
@@ -115,5 +115,72 @@ describe("extractArticleDocument", () => {
     const article = extractArticleDocument(document, "https://example.com/investigation");
 
     expect(article.author).toBe("Riley Reporter");
+  });
+
+  it("rejects generic pages instead of treating the entire body as an article", () => {
+    document.head.innerHTML = `<title>Example dashboard</title>`;
+    document.body.innerHTML = `
+      <header>Example</header>
+      <div><p>Welcome back to your dashboard and account overview.</p></div>
+      <footer>Privacy settings and navigation</footer>
+    `;
+
+    expect(() => extractArticleDocument(document, "https://example.com/account")).toThrow(
+      ArticleExtractionError,
+    );
+  });
+
+  it("rejects generic routes that misuse an article element without article metadata", () => {
+    document.head.innerHTML = `<title>Account help</title>`;
+    document.body.innerHTML = `
+      <article>
+        <h1>Account help</h1>
+        <p>This account page contains a long support explanation, but it is not a published news article.</p>
+        <p>Readers can update personal settings and review private account options from this screen.</p>
+      </article>
+    `;
+
+    expect(() => extractArticleDocument(document, "https://example.com/account/help")).toThrow(
+      ArticleExtractionError,
+    );
+  });
+
+  it("bounds aggregate article content while preserving a long-form article", () => {
+    document.head.innerHTML = `
+      <meta property="og:type" content="article" />
+      <meta property="og:title" content="A very long investigation" />
+      <link rel="canonical" href="https://example.com/investigation" />
+    `;
+    const paragraph = "A verified sentence about the investigation. ".repeat(500);
+    document.body.innerHTML = `<article>${Array.from(
+      { length: 30 },
+      (_, index) => `<p>${index} ${paragraph}</p>`,
+    ).join("")}</article>`;
+
+    const article = extractArticleDocument(document, "https://example.com/investigation");
+
+    expect(article.paragraphs.length).toBeGreaterThan(1);
+    expect(article.extraction.contentChars).toBeLessThanOrEqual(300_000);
+    expect(article.extraction.contentTruncated).toBe(true);
+    expect(article.extraction.articleStatus).toBe("article");
+  });
+
+  it("changes the fingerprint when a later paragraph changes", () => {
+    const paragraphs = Array.from({ length: 30 }, (_, index) => ({
+      id: `paragraph-${index + 1}`,
+      index,
+      kind: "paragraph" as const,
+      text: `A stable article paragraph at position ${index}.`,
+      speaker: null,
+    }));
+    const changed = paragraphs.map((paragraph) =>
+      paragraph.index === 25
+        ? { ...paragraph, text: "A breaking update changed this later paragraph." }
+        : paragraph,
+    );
+
+    expect(createArticleFingerprint("https://example.com/live", "Live story", paragraphs)).not.toBe(
+      createArticleFingerprint("https://example.com/live", "Live story", changed),
+    );
   });
 });

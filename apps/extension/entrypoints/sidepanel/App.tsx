@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { AnimatePresence } from "motion/react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { AnimatePresence, m, useReducedMotion } from "motion/react";
 import type {
   AdditionalContextResult,
   AnalysisPreferences,
@@ -11,6 +11,7 @@ import type {
   SourceListResult,
 } from "@perspectica/contracts";
 import { AnalysisProgress } from "./AnalysisProgress";
+import { ArticleAccessScreen } from "./ArticleAccessScreen";
 import { BrandHeader } from "./BrandHeader";
 import { Compass } from "./Compass";
 import { ChatGptConnectionScreen, usePerspecticaChatGpt } from "./ChatGptConnection";
@@ -18,19 +19,53 @@ import { TargetIcon } from "./Icons";
 import { ProgressiveText } from "./ProgressiveText";
 import { Section } from "./Section";
 import { SettingsScreen } from "./SettingsScreen";
-import {
-  DEFAULT_ANALYSIS_PREFERENCES,
-  readAnalysisPreferences,
-  saveAnalysisPreferences,
-} from "./preferences";
+import { SearchSetupScreen } from "./SearchSetupScreen";
+import { DEFAULT_ANALYSIS_PREFERENCES } from "./preferences";
 import {
   beginExtraction,
+  cancelReport,
   createInitialReportState,
   failReport,
   reduceAnalysisEvent,
   type ReportState,
 } from "./report-state";
-import { extensionMode, extractActiveArticle, streamAnalysis } from "./api";
+import {
+  extensionMode,
+  clearAnalysisLogs,
+  getAnalysisLogs,
+  getRuntimeState,
+  streamAnalysis,
+  type AnalysisStreamStatus,
+  testSearchProvider,
+  updateExtensionPreferences,
+} from "./api";
+import { subscribeRuntimePush } from "../../src/runtime/client";
+import type {
+  ExtensionPreferences,
+  RuntimeState,
+  SearchProviderKind,
+} from "../../src/runtime/messages";
+import { PERSPECTICA_RUNTIME_PROTOCOL } from "../../src/runtime/messages";
+
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.readOnly = true;
+    textarea.setAttribute("aria-hidden", "true");
+    textarea.style.position = "fixed";
+    textarea.style.inset = "0";
+    textarea.style.opacity = "0";
+    document.body.append(textarea);
+    textarea.select();
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    return copied;
+  }
+}
 
 function compactByline(author: string, publication: string | null): string {
   let cleanedAuthor = author.replace(/^(?:by\s+)+/i, "").trim();
@@ -58,7 +93,8 @@ function formatDate(value: string | null): string | null {
   });
 }
 
-function SourceLink({ source }: { source: ExternalSource }) {
+export function SourceLink({ source }: { source: ExternalSource }) {
+  const isSearchSummary = source.citationKind === "search-summary";
   return (
     <article className="source-result">
       <p>
@@ -73,10 +109,15 @@ function SourceLink({ source }: { source: ExternalSource }) {
           {source.publication ? ` · ${source.publication}` : ""}
           {source.publishedAt ? ` · ${new Date(source.publishedAt).toLocaleDateString()}` : ""}
         </small>
+        {isSearchSummary ? (
+          <small className="search-summary-label">Web-search summary</small>
+        ) : null}
       </p>
-      <blockquote>
-        <ProgressiveText text={`“${source.excerpt}”`} />
-      </blockquote>
+      {!isSearchSummary && source.excerpt ? (
+        <blockquote>
+          <ProgressiveText text={`“${source.excerpt}”`} />
+        </blockquote>
+      ) : null}
     </article>
   );
 }
@@ -86,6 +127,7 @@ interface CitationTarget {
   title: string;
   publication: string;
   url: string;
+  citationKind?: "source-excerpt" | "search-summary";
 }
 
 function InlineCitations({
@@ -103,9 +145,14 @@ function InlineCitations({
   return (
     <span className="inline-citations" aria-label="Sources">
       {accepted.map((citation) => (
-        <a key={citation.id} href={citation.url} target="_blank" rel="noreferrer">
-          {citation.publication || citation.title}
-        </a>
+        <span className="inline-citation" key={citation.id}>
+          <a href={citation.url} target="_blank" rel="noreferrer">
+            {citation.publication || citation.title}
+          </a>
+          {citation.citationKind === "search-summary" ? (
+            <small className="search-summary-label">Web-search summary</small>
+          ) : null}
+        </span>
       ))}
     </span>
   );
@@ -161,6 +208,7 @@ function evidenceCitationMap(sources: ExternalSource[]): Map<string, CitationTar
         title: source.title,
         publication: source.publication,
         url: source.url,
+        citationKind: source.citationKind,
       },
     ]),
   );
@@ -198,6 +246,7 @@ function JournalistBody({ result }: { result: JournalistContextResult }) {
                 title: finding.sourceTitle,
                 publication: finding.publication,
                 url: finding.url,
+                citationKind: finding.citationKind,
               },
             ]),
           )
@@ -221,10 +270,15 @@ function JournalistBody({ result }: { result: JournalistContextResult }) {
               {finding.sourceTitle}
             </a>
             <small>{finding.publication ? ` · ${finding.publication}` : ""}</small>
+            {finding.citationKind === "search-summary" ? (
+              <small className="search-summary-label">Web-search summary</small>
+            ) : null}
           </p>
-          <blockquote>
-            <ProgressiveText text={`“${finding.excerpt}”`} />
-          </blockquote>
+          {finding.citationKind !== "search-summary" && finding.excerpt ? (
+            <blockquote>
+              <ProgressiveText text={`“${finding.excerpt}”`} />
+            </blockquote>
+          ) : null}
         </article>
       ))}
     </>
@@ -273,8 +327,42 @@ interface AnalysisReportProps {
   onOpenSettings: () => void;
 }
 
+export function PartialReportNotice({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div className="page-notice report-partial-notice" role="status">
+      <strong>Most of the report is ready.</strong>
+      <p>
+        One or more research sections could not finish. Available results are shown below, and
+        incomplete sections are clearly marked.
+      </p>
+      <button type="button" onClick={onRetry}>
+        Retry the full report
+      </button>
+    </div>
+  );
+}
+
+export function ProvisionalCompassWarning() {
+  return (
+    <p className="compass-result-warning" role="alert">
+      Political-spectrum research did not finish. This preliminary placement may change if you retry
+      the report.
+    </p>
+  );
+}
+
 function AnalysisReport({ preferences, onOpenSettings }: AnalysisReportProps) {
   const [state, setState] = useState<ReportState>(createInitialReportState);
+  const [streamStatus, setStreamStatus] = useState<AnalysisStreamStatus>("connected");
+  const [logCopyStatus, setLogCopyStatus] = useState<"idle" | "copying" | "copied" | "error">(
+    "idle",
+  );
+  const [logClearStatus, setLogClearStatus] = useState<"idle" | "clearing" | "cleared" | "error">(
+    "idle",
+  );
+  const [logExportText, setLogExportText] = useState<string | null>(null);
+  const [logExportError, setLogExportError] = useState<string | null>(null);
+  const logExportRef = useRef<HTMLTextAreaElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const runRef = useRef(0);
   const effectStartedRef = useRef(false);
@@ -285,23 +373,24 @@ function AnalysisReport({ preferences, onOpenSettings }: AnalysisReportProps) {
     preferencesRef.current = preferences;
   }, [preferences]);
 
-  const analyze = useCallback(async () => {
+  const analyze = useCallback(async (forceNew = false) => {
     const runId = ++runRef.current;
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
     setState(beginExtraction());
+    setStreamStatus("connected");
 
     try {
-      const article = await extractActiveArticle();
       await streamAnalysis(
-        article,
         (event) => {
           if (runRef.current !== runId) return;
           setState((current) => reduceAnalysisEvent(current, event));
         },
         controller.signal,
         preferencesRef.current,
+        setStreamStatus,
+        { forceNew },
       );
     } catch (error) {
       if (controller.signal.aborted) return;
@@ -315,6 +404,12 @@ function AnalysisReport({ preferences, onOpenSettings }: AnalysisReportProps) {
       }
     }
   }, []);
+
+  const cancelAnalysis = useCallback(() => {
+    if (state.phase !== "extracting" && state.phase !== "analyzing") return;
+    abortRef.current?.abort();
+    setState((current) => cancelReport(current));
+  }, [state.phase]);
 
   useEffect(() => {
     // React StrictMode replays effects in development. The run id and abort
@@ -339,6 +434,42 @@ function AnalysisReport({ preferences, onOpenSettings }: AnalysisReportProps) {
 
   const metadata = state.metadata;
   const publishedAt = formatDate(metadata?.publishedAt ?? null);
+  const copyLogs = useCallback(async () => {
+    setLogCopyStatus("copying");
+    setLogExportError(null);
+    try {
+      const exported = await getAnalysisLogs();
+      if (await copyText(exported.text)) {
+        setLogExportText(null);
+        setLogCopyStatus("copied");
+        return;
+      }
+      setLogExportText(exported.text);
+      setLogCopyStatus("error");
+      requestAnimationFrame(() => {
+        logExportRef.current?.focus();
+        logExportRef.current?.select();
+      });
+    } catch (error) {
+      setLogExportError(
+        error instanceof Error ? error.message : "Perspectica could not prepare the logs.",
+      );
+      setLogCopyStatus("error");
+    }
+  }, []);
+
+  const clearLogs = useCallback(async () => {
+    if (state.phase === "idle" || !window.confirm("Clear saved telemetry for this analysis?")) {
+      return;
+    }
+    setLogClearStatus("clearing");
+    try {
+      await clearAnalysisLogs();
+      setLogClearStatus("cleared");
+    } catch {
+      setLogClearStatus("error");
+    }
+  }, [state.phase]);
 
   return (
     <div className="app-shell atmosphere-page">
@@ -368,21 +499,41 @@ function AnalysisReport({ preferences, onOpenSettings }: AnalysisReportProps) {
         )}
       </header>
 
-      <AnalysisProgress state={state} />
+      <AnalysisProgress state={state} onCancel={cancelAnalysis} />
+      {streamStatus === "reconnecting" && state.phase === "analyzing" ? (
+        <p className="stream-reconnect">Reconnecting to the analysis…</p>
+      ) : null}
 
       <main className="report-main">
         {state.error ? (
           <div className="page-error" role="alert">
             <strong>Perspectica could not finish this article.</strong>
             <p>{state.error}</p>
-            <button type="button" onClick={() => void analyze()}>
+            <button type="button" onClick={() => void analyze(true)}>
               Try again
             </button>
           </div>
         ) : null}
 
+        {state.phase === "cancelled" ? (
+          <div className="page-notice" role="status">
+            <strong>Analysis stopped.</strong>
+            <p>You can run the report again whenever you are ready.</p>
+            <button type="button" onClick={() => void analyze(true)}>
+              Analyze again
+            </button>
+          </div>
+        ) : null}
+
+        {state.phase === "partial" ? (
+          <PartialReportNotice onRetry={() => void analyze(true)} />
+        ) : null}
+
         {state.compass.data ? (
-          <Compass result={state.compass.data} />
+          <>
+            <Compass result={state.compass.data} />
+            {state.compass.status === "error" ? <ProvisionalCompassWarning /> : null}
+          </>
         ) : (
           <div className="compass-placeholder">
             <TargetIcon />
@@ -483,6 +634,62 @@ function AnalysisReport({ preferences, onOpenSettings }: AnalysisReportProps) {
         >
           {state.sourceList.data ? <SourceListBody result={state.sourceList.data} /> : null}
         </Section>
+
+        <footer className="telemetry-footer">
+          <button
+            type="button"
+            className="copy-logs-button"
+            onClick={() => void copyLogs()}
+            disabled={logCopyStatus === "copying" || state.phase === "idle"}
+          >
+            {logCopyStatus === "copying"
+              ? "Preparing logs…"
+              : logCopyStatus === "copied"
+                ? "Logs copied"
+                : logCopyStatus === "error"
+                  ? logExportText
+                    ? "Logs ready below"
+                    : "Try copying logs again"
+                  : "Copy logs"}
+          </button>
+          <button
+            type="button"
+            className="clear-logs-button"
+            onClick={() => void clearLogs()}
+            disabled={logClearStatus === "clearing" || state.phase === "idle"}
+          >
+            {logClearStatus === "clearing"
+              ? "Clearing…"
+              : logClearStatus === "cleared"
+                ? "Telemetry cleared"
+                : logClearStatus === "error"
+                  ? "Could not clear"
+                  : "Clear logs"}
+          </button>
+          {logExportText ? (
+            <div className="manual-log-export">
+              <p>
+                Automatic copy was blocked. The full sanitized log is selected below—press Command+C
+                to copy it.
+              </p>
+              <textarea
+                ref={logExportRef}
+                readOnly
+                value={logExportText}
+                aria-label="Perspectica analysis telemetry"
+                onFocus={(event) => event.currentTarget.select()}
+              />
+            </div>
+          ) : null}
+          {logExportError ? (
+            <p className="telemetry-error" role="alert">
+              {logExportError}
+            </p>
+          ) : null}
+          <span className="sr-only">
+            {logCopyStatus === "copied" ? "Full sanitized telemetry copied." : ""}
+          </span>
+        </footer>
       </main>
     </div>
   );
@@ -490,32 +697,216 @@ function AnalysisReport({ preferences, onOpenSettings }: AnalysisReportProps) {
 
 function ChatGptApp() {
   const connection = usePerspecticaChatGpt();
+  const reduceMotion = useReducedMotion();
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [preferences, setPreferences] = useState(readAnalysisPreferences);
+  const [runtime, setRuntime] = useState<RuntimeState | null>(null);
+  const [runtimeError, setRuntimeError] = useState<string | null>(null);
+  const [runtimeAttempt, setRuntimeAttempt] = useState(0);
+  const [providerReady, setProviderReady] = useState(false);
+  const [articleAccess, setArticleAccess] = useState<"loading" | "granted" | "missing">("loading");
+
+  useEffect(() => {
+    let active = true;
+    setRuntimeError(null);
+    void getRuntimeState()
+      .then((state) => {
+        if (!active) return;
+        if (state.runtimeProtocol !== PERSPECTICA_RUNTIME_PROTOCOL) {
+          // Load-unpacked builds can refresh the side-panel document while an
+          // older service worker remains alive. Reload the entire extension
+          // before any analysis starts instead of mixing runtime generations.
+          chrome.runtime.reload();
+          return;
+        }
+        setRuntime(state);
+        setProviderReady(state.preferences.searchProvider === "chatgpt" || state.hasExaKey);
+      })
+      .catch((cause: unknown) => {
+        if (!active) return;
+        setRuntimeError(
+          cause instanceof Error
+            ? cause.message
+            : "Perspectica could not start its local extension runtime.",
+        );
+      });
+    const unsubscribe = subscribeRuntimePush((message) => {
+      if (message.type === "auth.changed") {
+        setRuntime((current) => (current ? { ...current, auth: message.auth } : current));
+      }
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [runtimeAttempt]);
+
+  useEffect(() => {
+    let active = true;
+    void chrome.permissions
+      .contains({ origins: ["<all_urls>"] })
+      .then((granted) => {
+        if (active) setArticleAccess(granted ? "granted" : "missing");
+      })
+      .catch(() => {
+        if (active) setArticleAccess("missing");
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const updatePreferences = (next: AnalysisPreferences) => {
-    setPreferences(next);
-    saveAnalysisPreferences(next);
+    if (!runtime) return;
+    const updated: ExtensionPreferences = {
+      ...runtime.preferences,
+      ...next,
+    };
+    setRuntime({ ...runtime, preferences: updated });
+    void updateExtensionPreferences(updated);
   };
+
+  const updateSearchProvider = async (provider: SearchProviderKind) => {
+    if (!runtime) throw new Error("Perspectica settings are still loading.");
+    const test = await testSearchProvider(provider);
+    if (!test.available) throw new Error(`${provider} search is not available.`);
+    const updated = { ...runtime.preferences, searchProvider: provider };
+    setRuntime({ ...runtime, preferences: updated });
+    setProviderReady(true);
+    await updateExtensionPreferences(updated);
+  };
+
+  let page: ReactNode;
+  if (runtimeError) {
+    page = (
+      <div className="connection-shell atmosphere-page">
+        <BrandHeader
+          action="menu"
+          actionLabel="Open preferences"
+          onAction={() => setSettingsOpen(true)}
+        />
+        <main className="runtime-state-screen" role="alert">
+          <p className="eyebrow">Extension runtime</p>
+          <h1>Perspectica needs a moment.</h1>
+          <p>{runtimeError}</p>
+          <button
+            type="button"
+            className="chatgpt-action"
+            onClick={() => {
+              setRuntime(null);
+              setRuntimeAttempt((attempt) => attempt + 1);
+            }}
+          >
+            Try again
+          </button>
+        </main>
+      </div>
+    );
+  } else if (connection.isAuthenticated && (!runtime || articleAccess === "loading")) {
+    page = (
+      <div className="connection-shell atmosphere-page">
+        <BrandHeader
+          action="menu"
+          actionLabel="Open preferences"
+          onAction={() => setSettingsOpen(true)}
+        />
+        <main className="runtime-state-screen" aria-live="polite">
+          <p className="eyebrow">Preparing Perspectica</p>
+          <h1>Restoring your local session…</h1>
+          <div className="section-loading" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </div>
+        </main>
+      </div>
+    );
+  } else if (connection.isAuthenticated && runtime && articleAccess === "missing") {
+    page = (
+      <ArticleAccessScreen
+        onReady={() => setArticleAccess("granted")}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
+    );
+  } else if (connection.isAuthenticated && runtime && providerReady) {
+    page = (
+      <AnalysisReport
+        preferences={runtime.preferences}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
+    );
+  } else if (connection.isAuthenticated && runtime) {
+    page = (
+      <SearchSetupScreen
+        preferences={runtime.preferences}
+        onChange={async (preferences) => {
+          await updateExtensionPreferences(preferences);
+          setRuntime({
+            ...runtime,
+            preferences,
+            hasExaKey: preferences.searchProvider === "exa" || runtime.hasExaKey,
+          });
+        }}
+        onReady={() => setProviderReady(true)}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
+    );
+  } else {
+    page = (
+      <ChatGptConnectionScreen
+        connection={connection}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
+    );
+  }
 
   return (
     <>
-      {connection.isAuthenticated ? (
-        <AnalysisReport preferences={preferences} onOpenSettings={() => setSettingsOpen(true)} />
-      ) : (
-        <ChatGptConnectionScreen
-          connection={connection}
-          onOpenSettings={() => setSettingsOpen(true)}
-        />
-      )}
+      <AnimatePresence initial={false} mode="wait">
+        <m.div
+          key={
+            runtimeError
+              ? "runtime-error"
+              : connection.isAuthenticated && (!runtime || articleAccess === "loading")
+                ? "runtime-loading"
+                : connection.isAuthenticated && articleAccess === "missing"
+                  ? "article-access"
+                  : connection.isAuthenticated && runtime && providerReady
+                    ? "analysis"
+                    : connection.isAuthenticated
+                      ? "search"
+                      : "login"
+          }
+          className="page-transition"
+          initial={reduceMotion ? false : { opacity: 0, y: 4 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={reduceMotion ? undefined : { opacity: 0, y: -4 }}
+          transition={{ duration: reduceMotion ? 0 : 0.18, ease: "easeOut" }}
+        >
+          {page}
+        </m.div>
+      </AnimatePresence>
       <AnimatePresence>
         {settingsOpen ? (
           <SettingsScreen
             authenticated={connection.isAuthenticated}
-            preferences={preferences}
+            preferences={runtime?.preferences ?? DEFAULT_ANALYSIS_PREFERENCES}
             onChange={updatePreferences}
             onClose={() => setSettingsOpen(false)}
             onDisconnect={connection.logout}
+            availableModels={connection.models}
+            searchProvider={runtime?.preferences.searchProvider}
+            hasExaKey={runtime?.hasExaKey}
+            onSearchProviderChange={updateSearchProvider}
+            onExaKeySaved={() => {
+              if (!runtime) return;
+              setRuntime({ ...runtime, hasExaKey: true });
+              setProviderReady(true);
+            }}
+            onExaKeyRemoved={() => {
+              if (!runtime) return;
+              setRuntime({ ...runtime, hasExaKey: false });
+              if (runtime.preferences.searchProvider === "exa") setProviderReady(false);
+            }}
           />
         ) : null}
       </AnimatePresence>

@@ -44,22 +44,21 @@ The current article normally contributes 65–85% of the result. Publication his
 
 All article evidence excerpts must occur exactly in the retrieved article text. Research URLs are preserved on each record. Opinion and analysis can receive stronger placements when their own argument supports one; straight news may remain Center even when its publication has a documented historical leaning.
 
-## Rebuilding
+## Validation and collection
 
 Run these commands from the repository root:
 
 ```sh
 pnpm dataset:spectrum:collect
-pnpm dataset:spectrum:build
 pnpm dataset:spectrum:validate
 pnpm dataset:spectrum:summarize
 ```
 
-The build uses the server-only Exa configuration and the local authenticated ChatGPT session. If a run stops, resume it with:
-
-```sh
-pnpm dataset:spectrum:build -- --resume
-```
+The committed classified records are the reviewed calibration artifact used by
+the product. `dataset:spectrum:collect` is an optional maintainer tool for
+refreshing the raw public corpus; it uses a local Exa key and does not run inside
+the extension. A new classification set must be reviewed and committed before it
+replaces the current records.
 
 ## Limitations
 

@@ -1,5 +1,5 @@
 import { m, useReducedMotion } from "motion/react";
-import { Fragment, useMemo } from "react";
+import { Fragment, useEffect, useMemo, useRef } from "react";
 import { splitStreamChunks, streamDurationMs } from "./streaming";
 
 interface ProgressiveTextProps {
@@ -10,24 +10,29 @@ interface ProgressiveTextProps {
 function StreamRun({ text }: { text: string }) {
   const reduceMotion = useReducedMotion();
   const chunks = useMemo(() => splitStreamChunks(text), [text]);
+  const firstRender = useRef(true);
+  useEffect(() => {
+    firstRender.current = false;
+  }, []);
+  const reveal = firstRender.current && !reduceMotion;
   const durationSeconds = streamDurationMs(chunks.length) / 1_000;
 
   return (
     <>
       {chunks.map((chunk, index) => {
-        const word = chunk.match(/^\S+/)?.[0] ?? chunk;
+        const word = chunk.match(/^\S+/)?.[0] ?? "";
         const whitespace = chunk.slice(word.length);
 
         return (
           <Fragment key={`${index}-${chunk}`}>
             <m.span
-              animate={reduceMotion ? { opacity: 1 } : { opacity: 1, filter: "blur(0px)", y: 0 }}
-              style={reduceMotion ? undefined : { display: "inline-block" }}
-              initial={reduceMotion ? false : { opacity: 0, filter: "blur(2px)", y: 3 }}
+              animate={reveal ? { opacity: 1, filter: "blur(0px)", y: 0 } : { opacity: 1 }}
+              style={reveal ? { display: "inline-block" } : undefined}
+              initial={reveal ? { opacity: 0, filter: "blur(2px)", y: 3 } : false}
               transition={{
-                duration: reduceMotion ? 0 : 0.17,
+                duration: reveal ? 0.17 : 0,
                 delay:
-                  reduceMotion || chunks.length <= 1
+                  !reveal || chunks.length <= 1
                     ? 0
                     : (index / (chunks.length - 1)) * durationSeconds,
                 ease: "easeOut",

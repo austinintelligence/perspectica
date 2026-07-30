@@ -4,8 +4,24 @@ import type {
   ArticleParagraph,
   ContentType,
 } from "@perspectica/contracts";
+import {
+  ARTICLE_MAX_CONTENT_CHARS,
+  ARTICLE_MAX_LINKS,
+  ARTICLE_MAX_PARAGRAPH_CHARS,
+  ArticleDocumentSchema,
+  normalizeCanonicalUrl,
+} from "@perspectica/contracts";
 
-export const EXTRACTOR_VERSION = "dom-v3";
+export const EXTRACTOR_VERSION = "dom-v5";
+
+export class ArticleExtractionError extends Error {
+  readonly code = "NOT_ARTICLE";
+
+  constructor(message = "This page does not appear to contain a readable article.") {
+    super(message);
+    this.name = "ArticleExtractionError";
+  }
+}
 
 const excludedAncestorSelector =
   "nav, footer, aside, form, dialog, [aria-hidden='true'], [hidden], .advertisement, .ad, .promo, .newsletter, .comments, [class*='newsletter'], [class*='promo'], [data-component*='newsletter'], [data-component*='promo'], [data-testid*='newsletter']";
@@ -106,20 +122,57 @@ function getCanonicalUrl(document: Document, fallbackUrl: string): string {
   const canonical = document.querySelector<HTMLLinkElement>("link[rel='canonical']")?.href;
   const socialUrl = firstMeta(document, ["meta[property='og:url']"]);
   for (const candidate of [canonical, socialUrl, fallbackUrl]) {
-    try {
-      const url = new URL(candidate ?? fallbackUrl, fallbackUrl);
-      if (url.protocol === "http:" || url.protocol === "https:") {
-        url.hash = "";
-        return url.toString();
-      }
-    } catch {
-      // Try the next candidate.
-    }
+    const normalized = normalizeCanonicalUrl(candidate ?? fallbackUrl, fallbackUrl);
+    if (normalized) return normalized;
   }
-  return fallbackUrl;
+  throw new ArticleExtractionError("The current page does not have a valid web URL.");
 }
 
-function chooseArticleRoot(document: Document): Element {
+type ArticleRoot = {
+  element: Element;
+  status: "article" | "uncertain";
+};
+
+function hasStructuredArticleData(document: Document): boolean {
+  const visit = (value: unknown): boolean => {
+    if (Array.isArray(value)) return value.some(visit);
+    if (!value || typeof value !== "object") return false;
+    const record = value as Record<string, unknown>;
+    const types = Array.isArray(record["@type"]) ? record["@type"] : [record["@type"]];
+    if (types.some((entry) => entry === "NewsArticle" || entry === "Article")) return true;
+    return record["@graph"] !== undefined && visit(record["@graph"]);
+  };
+
+  return [
+    ...document.querySelectorAll<HTMLScriptElement>("script[type='application/ld+json']"),
+  ].some((script) => {
+    try {
+      return visit(JSON.parse(script.textContent ?? ""));
+    } catch {
+      return false;
+    }
+  });
+}
+
+function hasArticleMetadata(document: Document): boolean {
+  const declaredType = firstMeta(document, ["meta[property='og:type']", "meta[name='og:type']"]);
+  return (
+    declaredType?.toLocaleLowerCase("en-US") === "article" ||
+    Boolean(
+      firstMeta(document, ["meta[property='article:published_time']", "meta[name='date']"]),
+    ) ||
+    hasStructuredArticleData(document)
+  );
+}
+
+function hasArticleTitle(document: Document): boolean {
+  return Boolean(
+    firstMeta(document, ["meta[property='og:title']", "meta[name='twitter:title']"]) ||
+    firstText(document, ["article h1", "main h1", "h1"]),
+  );
+}
+
+function chooseArticleRoot(document: Document, canonicalUrl: string): ArticleRoot {
   const candidates = [
     ...document.querySelectorAll("article"),
     ...document.querySelectorAll("main"),
@@ -135,11 +188,59 @@ function chooseArticleRoot(document: Document): Element {
         (total, paragraph) => total + cleanText(paragraph.textContent).length,
         0,
       );
-      return { element, score: textLength + paragraphs.length * 200 };
+      return {
+        element,
+        longParagraphs: paragraphs.length,
+        score: textLength + paragraphs.length * 200,
+        hasHeading: Boolean(element.querySelector("h1")),
+      };
     })
     .sort((left, right) => right.score - left.score);
 
-  return scored[0]?.element ?? document.body ?? document.documentElement;
+  const path = new URL(canonicalUrl).pathname.toLocaleLowerCase("en-US");
+  const genericPath =
+    /(?:^|\/)(?:search|login|logout|signup|register|account|profile|tag|tags|topic|topics|category|categories|author|authors|videos?)(?:\/|$)/.test(
+      path,
+    );
+  const metadata = hasArticleMetadata(document);
+  const titleMetadata = hasArticleTitle(document);
+  const explicitArticle = scored.find(
+    (candidate) => candidate.element.tagName.toLowerCase() === "article",
+  );
+
+  if (explicitArticle && explicitArticle.longParagraphs > 0 && (!genericPath || metadata)) {
+    return { element: explicitArticle.element, status: "article" };
+  }
+
+  const likelyArticle = scored.find(
+    (candidate) =>
+      candidate.longParagraphs > 0 &&
+      !genericPath &&
+      (metadata ||
+        (titleMetadata && candidate.element.tagName.toLocaleLowerCase("en-US") === "main") ||
+        (candidate.hasHeading && candidate.longParagraphs >= 2)),
+  );
+  if (likelyArticle) {
+    return {
+      element: likelyArticle.element,
+      status: metadata ? "article" : "uncertain",
+    };
+  }
+
+  // Some publishers expose article metadata but put the readable body
+  // directly under <body>. That is safe to support because structured article
+  // metadata distinguishes it from a generic page shell.
+  const body = document.body ?? document.documentElement;
+  const bodyParagraphs = [...body.querySelectorAll("p")].filter(
+    (paragraph) => cleanText(paragraph.textContent).length >= 40,
+  );
+  if (metadata && !genericPath && bodyParagraphs.length > 0) {
+    return { element: body, status: "article" };
+  }
+
+  throw new ArticleExtractionError(
+    "Open a news article or other long-form story, then try again. Generic pages and navigation screens are not analyzed.",
+  );
 }
 
 function extractTitle(document: Document): string {
@@ -199,18 +300,37 @@ function detectContentType(document: Document, canonicalUrl: string): ContentTyp
   return "news";
 }
 
-function extractParagraphs(root: Element): ArticleParagraph[] {
+function extractParagraphs(root: Element): { paragraphs: ArticleParagraph[]; truncated: boolean } {
   const elements = [...root.querySelectorAll("h2, h3, p, blockquote")];
   const paragraphs: ArticleParagraph[] = [];
+  let contentChars = 0;
+  let truncated = false;
 
   for (const element of elements) {
     if (element.closest(excludedAncestorSelector)) continue;
-    const text = cleanText(element.textContent);
+    const originalText = cleanText(element.textContent);
     const tagName = element.tagName.toLocaleLowerCase("en-US");
     const kind =
       tagName === "blockquote" ? "quote" : tagName.startsWith("h") ? "heading" : "paragraph";
     const minimumLength = kind === "heading" ? 4 : 40;
-    if (text.length < minimumLength) continue;
+    if (originalText.length < minimumLength) continue;
+
+    const remaining = ARTICLE_MAX_CONTENT_CHARS - contentChars;
+    if (remaining < minimumLength) {
+      truncated = true;
+      break;
+    }
+    const text = originalText.slice(0, Math.min(ARTICLE_MAX_PARAGRAPH_CHARS, remaining)).trim();
+    if (text.length < minimumLength) {
+      truncated = true;
+      break;
+    }
+    if (
+      text.length < originalText.length ||
+      contentChars + text.length >= ARTICLE_MAX_CONTENT_CHARS
+    ) {
+      truncated = true;
+    }
 
     paragraphs.push({
       id: `paragraph-${paragraphs.length + 1}`,
@@ -224,22 +344,11 @@ function extractParagraphs(root: Element): ArticleParagraph[] {
             null
           : null,
     });
+    contentChars += text.length;
+    if (contentChars >= ARTICLE_MAX_CONTENT_CHARS) break;
   }
 
-  if (paragraphs.length === 0) {
-    const fallback = cleanText(root.textContent);
-    if (fallback) {
-      paragraphs.push({
-        id: "paragraph-1",
-        index: 0,
-        kind: "paragraph",
-        text: fallback.slice(0, 20_000),
-        speaker: null,
-      });
-    }
-  }
-
-  return paragraphs;
+  return { paragraphs, truncated };
 }
 
 function findParagraphId(
@@ -262,18 +371,12 @@ function extractLinks(
   const links: ArticleLink[] = [];
 
   for (const anchor of root.querySelectorAll<HTMLAnchorElement>("a[href]")) {
+    if (links.length >= ARTICLE_MAX_LINKS) break;
     if (anchor.closest(excludedAncestorSelector)) continue;
-    let url: URL;
-    try {
-      url = new URL(anchor.href, canonicalUrl);
-    } catch {
-      continue;
-    }
-    if (url.protocol !== "http:" && url.protocol !== "https:") continue;
-    url.hash = "";
-    const normalized = url.toString();
-    if (normalized === canonicalUrl || seen.has(normalized)) continue;
+    const normalized = normalizeCanonicalUrl(anchor.href, canonicalUrl);
+    if (!normalized || normalized === canonicalUrl || seen.has(normalized)) continue;
     seen.add(normalized);
+    const url = new URL(normalized);
 
     const label =
       cleanText(anchor.textContent) ||
@@ -290,8 +393,8 @@ function extractLinks(
   return links;
 }
 
-function fnv1a(value: string): string {
-  let hash = 0x811c9dc5;
+function fnv1a(value: string, seed = 0x811c9dc5): string {
+  let hash = seed;
   for (let index = 0; index < value.length; index += 1) {
     hash ^= value.charCodeAt(index);
     hash = Math.imul(hash, 0x01000193);
@@ -304,19 +407,28 @@ export function createArticleFingerprint(
   title: string,
   paragraphs: ArticleParagraph[],
 ): string {
-  const sample = paragraphs
-    .slice(0, 20)
-    .map((paragraph) => paragraph.text)
-    .join("\n")
-    .slice(0, 20_000);
-  return `article-${fnv1a(`${canonicalUrl}\n${title}\n${sample}`)}`;
+  // The fingerprint is the background runtime's authority for deciding
+  // whether a persisted report still belongs to the page. Hash the entire
+  // bounded extraction (at most 300k characters) so live blogs and dynamic
+  // article pages cannot silently reuse a report after only a later paragraph
+  // changed.
+  const content = paragraphs.map((paragraph) => `${paragraph.kind}:${paragraph.text}`).join("\n");
+  const payload = `${canonicalUrl}\n${title}\n${content}`;
+  return `article-${fnv1a(payload)}${fnv1a(payload, 0x9e3779b9)}`;
 }
 
 export function extractArticleDocument(document: Document, fallbackUrl: string): ArticleDocument {
   const canonicalUrl = getCanonicalUrl(document, fallbackUrl);
-  const root = chooseArticleRoot(document);
+  const root = chooseArticleRoot(document, canonicalUrl);
   const title = extractTitle(document);
-  const paragraphs = extractParagraphs(root);
+  const extracted = extractParagraphs(root.element);
+  if (extracted.paragraphs.length === 0) {
+    throw new ArticleExtractionError("No readable article paragraphs were found on this page.");
+  }
+  const contentChars = extracted.paragraphs.reduce(
+    (total, paragraph) => total + paragraph.text.length,
+    0,
+  );
   const publication = firstMeta(document, [
     "meta[property='og:site_name']",
     "meta[name='application-name']",
@@ -331,8 +443,8 @@ export function extractArticleDocument(document: Document, fallbackUrl: string):
     ]),
   );
 
-  return {
-    fingerprint: createArticleFingerprint(canonicalUrl, title, paragraphs),
+  return ArticleDocumentSchema.parse({
+    fingerprint: createArticleFingerprint(canonicalUrl, title, extracted.paragraphs),
     canonicalUrl,
     title,
     author: extractAuthor(document, publication),
@@ -340,15 +452,19 @@ export function extractArticleDocument(document: Document, fallbackUrl: string):
     publishedAt,
     language: cleanText(document.documentElement.lang) || null,
     contentType: detectContentType(document, canonicalUrl),
-    paragraphs,
-    links: extractLinks(root, canonicalUrl, paragraphs),
+    paragraphs: extracted.paragraphs,
+    links: extractLinks(root.element, canonicalUrl, extracted.paragraphs),
     extraction: {
       extractorVersion: EXTRACTOR_VERSION,
       extractedAt: new Date().toISOString(),
-      wordCount: paragraphs.reduce(
+      wordCount: extracted.paragraphs.reduce(
         (total, paragraph) => total + paragraph.text.split(/\s+/).filter(Boolean).length,
         0,
       ),
+      articleStatus: root.status,
+      contentChars,
+      contentTruncated: extracted.truncated,
+      rejectionReason: null,
     },
-  };
+  });
 }

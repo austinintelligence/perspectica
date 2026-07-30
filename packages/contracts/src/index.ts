@@ -1,4 +1,5 @@
 import { z } from "zod";
+export { normalizeCanonicalUrl } from "./canonical-url";
 
 const trimmedText = z.string().trim();
 const requiredText = trimmedText.min(1);
@@ -15,11 +16,24 @@ export type ContentType = z.infer<typeof ContentTypeSchema>;
 export const ArticleParagraphKindSchema = z.enum(["heading", "paragraph", "quote"]);
 export type ArticleParagraphKind = z.infer<typeof ArticleParagraphKindSchema>;
 
+/**
+ * Article payload limits protect runtime messages and model context while
+ * leaving room for normal long-form reporting. The limit is measured over the
+ * normalized paragraph text, not the serialized JSON envelope.
+ */
+export const ARTICLE_MAX_CONTENT_CHARS = 300_000;
+export const ARTICLE_MAX_PARAGRAPH_CHARS = 20_000;
+export const ARTICLE_MAX_PARAGRAPHS = 2_000;
+export const ARTICLE_MAX_LINKS = 1_000;
+
+export const ArticleStatusSchema = z.enum(["article", "uncertain", "non-article"]);
+export type ArticleStatus = z.infer<typeof ArticleStatusSchema>;
+
 export const ArticleParagraphSchema = z.object({
   id: requiredText,
   index: z.number().int().nonnegative(),
   kind: ArticleParagraphKindSchema,
-  text: requiredText.max(20_000),
+  text: requiredText.max(ARTICLE_MAX_PARAGRAPH_CHARS),
   speaker: trimmedText.max(500).nullable().optional(),
 });
 export type ArticleParagraph = z.infer<typeof ArticleParagraphSchema>;
@@ -32,6 +46,24 @@ export const ArticleLinkSchema = z.object({
 });
 export type ArticleLink = z.infer<typeof ArticleLinkSchema>;
 
+const ArticleParagraphsSchema = z
+  .array(ArticleParagraphSchema)
+  .min(1)
+  .max(ARTICLE_MAX_PARAGRAPHS)
+  .superRefine((paragraphs, context) => {
+    const contentChars = paragraphs.reduce((total, paragraph) => total + paragraph.text.length, 0);
+    if (contentChars > ARTICLE_MAX_CONTENT_CHARS) {
+      context.addIssue({
+        code: "too_big",
+        maximum: ARTICLE_MAX_CONTENT_CHARS,
+        origin: "number",
+        inclusive: true,
+        path: [],
+        message: `Article content exceeds ${ARTICLE_MAX_CONTENT_CHARS.toLocaleString("en-US")} characters`,
+      });
+    }
+  });
+
 export const ArticleDocumentSchema = z.object({
   fingerprint: requiredText.max(128),
   canonicalUrl: httpUrl,
@@ -41,12 +73,17 @@ export const ArticleDocumentSchema = z.object({
   publishedAt: z.string().datetime({ offset: true }).nullable(),
   language: trimmedText.max(50).nullable(),
   contentType: ContentTypeSchema,
-  paragraphs: z.array(ArticleParagraphSchema).min(1).max(2_000),
-  links: z.array(ArticleLinkSchema).max(1_000),
+  paragraphs: ArticleParagraphsSchema,
+  links: z.array(ArticleLinkSchema).max(ARTICLE_MAX_LINKS),
   extraction: z.object({
     extractorVersion: requiredText,
     extractedAt: z.string().datetime({ offset: true }),
     wordCount: z.number().int().nonnegative(),
+    /** Added as optional fields so persisted documents from older builds stay wire-compatible. */
+    articleStatus: ArticleStatusSchema.optional(),
+    contentChars: z.number().int().nonnegative().optional(),
+    contentTruncated: z.boolean().optional(),
+    rejectionReason: trimmedText.max(500).nullable().optional(),
   }),
 });
 export type ArticleDocument = z.infer<typeof ArticleDocumentSchema>;
@@ -114,6 +151,20 @@ export const PoliticalContextSourceKindSchema = z.enum([
 export type PoliticalContextSourceKind = z.infer<typeof PoliticalContextSourceKindSchema>;
 
 /**
+ * Describes what a reader-facing citation is grounded in.
+ *
+ * `source-excerpt` is copied from retrieved page text and may be rendered as a
+ * quotation. `search-summary` is a provider-generated, URL-attributed search
+ * note. It may support a cautious paraphrase, but must never be displayed as a
+ * quotation or described as page text.
+ *
+ * The field remains optional on exact-excerpt variants so stored reports from
+ * older builds stay wire-compatible.
+ */
+export const SourceCitationKindSchema = z.enum(["source-excerpt", "search-summary"]);
+export type SourceCitationKind = z.infer<typeof SourceCitationKindSchema>;
+
+/**
  * AI-selected, bounded weighting for the political-spectrum decision. The
  * article remains the anchor; the research mix is normalized again after
  * source validation so discarded evidence cannot affect the final score.
@@ -128,7 +179,7 @@ export const PoliticalContextWeightingSchema = z.object({
 });
 export type PoliticalContextWeighting = z.infer<typeof PoliticalContextWeightingSchema>;
 
-export const PoliticalContextSignalSchema = z.object({
+const PoliticalContextSignalBaseSchema = z.object({
   id: requiredText,
   sourceKind: PoliticalContextSourceKindSchema,
   subject: requiredText.max(500),
@@ -140,8 +191,17 @@ export const PoliticalContextSignalSchema = z.object({
   sourceTitle: requiredText.max(1_000),
   publication: requiredText.max(500),
   url: httpUrl,
-  excerpt: requiredText.max(2_000),
 });
+export const PoliticalContextSignalSchema = z.union([
+  PoliticalContextSignalBaseSchema.extend({
+    citationKind: z.literal("source-excerpt").optional(),
+    excerpt: requiredText.max(2_000),
+  }),
+  PoliticalContextSignalBaseSchema.extend({
+    citationKind: z.literal("search-summary"),
+    excerpt: z.null(),
+  }),
+]);
 export type PoliticalContextSignal = z.infer<typeof PoliticalContextSignalSchema>;
 
 export const PoliticalContextResultSchema = z.object({
@@ -314,30 +374,48 @@ export const EvidenceRelationshipSchema = z.enum([
 ]);
 export type EvidenceRelationship = z.infer<typeof EvidenceRelationshipSchema>;
 
-export const ExternalSourceSchema = z.object({
+const ExternalSourceBaseSchema = z.object({
   id: requiredText,
   claimId: requiredText.nullable(),
   title: requiredText.max(1_000),
   publication: requiredText.max(500),
   publishedAt: z.string().datetime({ offset: true }).nullable(),
-  excerpt: requiredText.max(4_000),
   relationship: EvidenceRelationshipSchema,
   relationshipExplanation: requiredText.max(2_000),
   url: httpUrl,
   sourceType: SourceTypeSchema,
   publicationContext: trimmedText.max(500).nullable(),
 });
+export const ExternalSourceSchema = z.union([
+  ExternalSourceBaseSchema.extend({
+    citationKind: z.literal("source-excerpt").optional(),
+    excerpt: requiredText.max(4_000),
+  }),
+  ExternalSourceBaseSchema.extend({
+    citationKind: z.literal("search-summary"),
+    excerpt: z.null(),
+  }),
+]);
 export type ExternalSource = z.infer<typeof ExternalSourceSchema>;
 
-export const JournalistContextFindingSchema = z.object({
+const JournalistContextFindingBaseSchema = z.object({
   id: requiredText,
   summary: requiredText.max(2_000),
   relevanceExplanation: requiredText.max(2_000),
   sourceTitle: requiredText.max(1_000),
   publication: requiredText.max(500),
   url: httpUrl,
-  excerpt: requiredText.max(4_000),
 });
+export const JournalistContextFindingSchema = z.union([
+  JournalistContextFindingBaseSchema.extend({
+    citationKind: z.literal("source-excerpt").optional(),
+    excerpt: requiredText.max(4_000),
+  }),
+  JournalistContextFindingBaseSchema.extend({
+    citationKind: z.literal("search-summary"),
+    excerpt: z.null(),
+  }),
+]);
 export type JournalistContextFinding = z.infer<typeof JournalistContextFindingSchema>;
 
 export const EmptyResultReasonSchema = z.enum([
@@ -491,7 +569,7 @@ export type AnalysisEvent = z.infer<typeof AnalysisEventSchema>;
 
 export const AnalysisReportSchema = z.object({
   metadata: AnalysisMetadataSchema,
-  article: AnalyzeRequestSchema.shape.article.pick({
+  article: ArticleDocumentSchema.pick({
     fingerprint: true,
     canonicalUrl: true,
     title: true,

@@ -40,4 +40,28 @@ describe("analysis progress copy", () => {
     expect(getAnalysisProgress(createInitialReportState())).toBeNull();
     expect(getAnalysisProgress({ ...createInitialReportState(), phase: "complete" })).toBeNull();
   });
+
+  it("reports completed lanes instead of inventing a percentage", () => {
+    const state = {
+      ...createInitialReportState(),
+      phase: "analyzing" as const,
+      metadata: {
+        title: "Article",
+        author: null,
+        publication: null,
+        publishedAt: null,
+        contentType: "news" as const,
+      },
+      compass: { status: "ready" as const, data: null, error: null },
+      bias: { status: "ready" as const, data: null, error: null },
+      journalistContext: { status: "loading" as const, data: null, error: null },
+    };
+
+    expect(getAnalysisProgress(state, Date.now())).toMatchObject({
+      label: "Checking journalist context",
+      completed: 2,
+      total: 6,
+    });
+    expect(getAnalysisProgress(state, Date.now())).not.toHaveProperty("progress");
+  });
 });

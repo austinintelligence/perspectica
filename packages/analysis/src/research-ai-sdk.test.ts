@@ -5,6 +5,7 @@ import { createResearchBrief } from "./index";
 import {
   AiSdkResearchProvider,
   buildContextBundlePrompt,
+  buildEvidenceBundlePrompt,
   buildEvidencePrompt,
   buildResearchQuery,
   type ResearchSearchProvider,
@@ -88,12 +89,6 @@ function streamResult(output: unknown) {
 function streamedModel(output: unknown): MockLanguageModelV4 {
   return new MockLanguageModelV4({
     doStream: streamResult(output),
-  });
-}
-
-function streamedOutputsModel(outputs: unknown[]): MockLanguageModelV4 {
-  return new MockLanguageModelV4({
-    doStream: outputs.map(streamResult),
   });
 }
 
@@ -187,11 +182,11 @@ function evidenceOutput() {
 }
 
 function streamedEvidenceModel(output: ReturnType<typeof evidenceOutput>): MockLanguageModelV4 {
-  return streamedOutputsModel([output.supporting, output.contradicting, output.additionalContext]);
+  return streamedModel(output);
 }
 
 describe("AiSdkResearchProvider evidence bundle", () => {
-  it("retrieves and synthesizes three isolated evidence lanes in parallel", async () => {
+  it("retrieves three isolated evidence lanes in parallel and synthesizes them once", async () => {
     const search = vi.fn(async (searchRequest: ResearchSearchRequest) => {
       if (searchRequest.query.includes("disputed corrected")) return [qualificationSource];
       if (searchRequest.query.includes("essential background")) return [contextSource];
@@ -209,8 +204,8 @@ describe("AiSdkResearchProvider evidence bundle", () => {
     expect(result.contradicting.sources).toHaveLength(1);
     expect(result.additionalContext.sources).toHaveLength(1);
     expect(search).toHaveBeenCalledTimes(3);
-    expect(model.doStreamCalls).toHaveLength(3);
-    expect(model.doStreamCalls.map((call) => call.maxOutputTokens)).toEqual([900, 900, 650]);
+    expect(model.doStreamCalls).toHaveLength(1);
+    expect(model.doStreamCalls[0]?.maxOutputTokens).toBe(2_400);
     expect(JSON.stringify(model.doStreamCalls[0]?.responseFormat)).not.toContain('"format":"uri"');
   });
 
@@ -282,10 +277,76 @@ describe("AiSdkResearchProvider evidence bundle", () => {
     expect(result.supporting.sources).toHaveLength(1);
   });
 
+  it("keeps native search notes citeable without treating them as quotations", async () => {
+    const noteSource: ResearchSearchResult = {
+      ...supportSource,
+      content:
+        "Web-search summary: the city record says the housing program is designed for 1,000 residents.",
+      contentKind: "search-note",
+    };
+    const output = evidenceOutput();
+    output.supporting.sources[0]!.excerpt = "A sentence that was never fetched from the page.";
+    output.supporting.sources[0]!.relationshipExplanation =
+      "The city record says the program is designed for 1,000 residents.";
+    const provider = new AiSdkResearchProvider({
+      model: streamedEvidenceModel(output),
+      searchProvider: {
+        search: async (searchRequest) =>
+          searchRequest.query.includes("disputed corrected")
+            ? [qualificationSource]
+            : searchRequest.query.includes("essential background")
+              ? [contextSource]
+              : [noteSource],
+      },
+    });
+
+    const result = await provider.evidenceBundle(request, claims);
+
+    expect(result.supporting.sources).toEqual([
+      expect.objectContaining({
+        url: supportSource.url,
+        citationKind: "search-summary",
+        excerpt: null,
+      }),
+    ]);
+  });
+
+  it("rejects a search-note relationship that invents details absent from the note", async () => {
+    const noteSource: ResearchSearchResult = {
+      ...supportSource,
+      content:
+        "Web-search summary: the city record says the housing program is designed for 1,000 residents.",
+      contentKind: "search-note",
+    };
+    const output = evidenceOutput();
+    output.supporting.sources[0]!.excerpt = "Purported page text that must not be rendered.";
+    output.supporting.sources[0]!.relationshipExplanation =
+      "The record guarantees permanent funding for ten years.";
+    const provider = new AiSdkResearchProvider({
+      model: streamedEvidenceModel(output),
+      searchProvider: {
+        search: async (searchRequest) =>
+          searchRequest.query.includes("disputed corrected")
+            ? [qualificationSource]
+            : searchRequest.query.includes("essential background")
+              ? [contextSource]
+              : [noteSource],
+      },
+    });
+
+    const result = await provider.evidenceBundle(request, claims);
+
+    expect(result.supporting).toMatchObject({
+      status: "empty",
+      sources: [],
+      emptyReason: "no-verified-evidence",
+    });
+  });
+
   it("isolates a failed search lane while preserving the other evidence sections", async () => {
     const output = evidenceOutput();
     const provider = new AiSdkResearchProvider({
-      model: streamedOutputsModel([output.supporting, output.additionalContext]),
+      model: streamedModel(output),
       searchProvider: {
         search: async (searchRequest) => {
           if (searchRequest.query.includes("disputed corrected")) {
@@ -306,20 +367,11 @@ describe("AiSdkResearchProvider evidence bundle", () => {
     expect(result.failures?.supporting).toBeUndefined();
   });
 
-  it("isolates a failed synthesis lane while preserving completed evidence", async () => {
-    const output = evidenceOutput();
+  it("records one failed bundle synthesis against each lane that had sources", async () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    let callIndex = 0;
     const model = new MockLanguageModelV4({
       doStream: async () => {
-        const current = callIndex;
-        callIndex += 1;
-        if (current === 1) {
-          throw new Error("Contradiction synthesis timed out");
-        }
-        return current === 0
-          ? streamResult(output.supporting)
-          : streamResult(output.additionalContext);
+        throw new Error("Bundle synthesis timed out");
       },
     });
     const provider = new AiSdkResearchProvider({
@@ -335,10 +387,12 @@ describe("AiSdkResearchProvider evidence bundle", () => {
 
     const result = await provider.evidenceBundle(request, claims);
 
-    expect(result.supporting.sources).toHaveLength(1);
-    expect(result.additionalContext.sources).toHaveLength(1);
+    expect(result.supporting.sources).toEqual([]);
     expect(result.contradicting.sources).toEqual([]);
+    expect(result.additionalContext.sources).toEqual([]);
+    expect(result.failures?.supporting).toBeInstanceOf(Error);
     expect(result.failures?.contradicting).toBeInstanceOf(Error);
+    expect(result.failures?.additionalContext).toBeInstanceOf(Error);
     consoleError.mockRestore();
   });
 
@@ -350,6 +404,22 @@ describe("AiSdkResearchProvider evidence bundle", () => {
     expect(contradictingPrompt).toContain("not a second supporting section");
     expect(contradictingPrompt).toContain("silence, omission, narrower coverage");
     expect(contextPrompt).toContain("definition, timeline, institutional process");
+  });
+
+  it("keeps all source pools separated in the combined synthesis prompt", () => {
+    const brief = createResearchBrief(request, claims);
+    const prompt = buildEvidenceBundlePrompt(brief, {
+      supporting: [supportSource],
+      contradicting: [qualificationSource],
+      additionalContext: [contextSource],
+    });
+
+    expect(prompt).toContain("<supporting-sources>");
+    expect(prompt).toContain("<contradicting-sources>");
+    expect(prompt).toContain("<additional-context-sources>");
+    expect(prompt).toContain("Never move a source between pools");
+    expect(prompt).toContain("search-note");
+    expect(prompt).toContain("set excerpt to null");
   });
 });
 
@@ -415,6 +485,88 @@ describe("AiSdkResearchProvider context bundle", () => {
     expect(model.doStreamCalls).toHaveLength(1);
   });
 
+  it("uses attributed search summaries for context without exposing a source quote", async () => {
+    const publicationNote =
+      "Independent media research describes Example News as a conservative, right-leaning outlet.";
+    const journalistNote =
+      "The reporter archive shows recurring public work about market-oriented housing policy.";
+    const output = {
+      politicalContext: {
+        status: "ready",
+        summary: "Independent research provides a weak contextual prior.",
+        signals: [
+          {
+            id: "publication-note",
+            sourceKind: "publication-history",
+            subject: "Example News",
+            score: 1.2,
+            direction: "right",
+            strength: 0.3,
+            relevance: 0.8,
+            explanation: "Independent research describes a durable right-leaning orientation.",
+            sourceTitle: "Media research",
+            publication: "Research Institute",
+            url: "https://research.example/native-note",
+            excerpt: "Purported page text that must not be rendered.",
+          },
+        ],
+      },
+      journalistContext: {
+        status: "ready",
+        summary: "The reporter has relevant public professional work.",
+        findings: [
+          {
+            id: "journalist-note",
+            summary: "The reporter repeatedly covers market-oriented housing policy.",
+            relevanceExplanation: "That recurring subject is relevant to this article.",
+            sourceTitle: "Reporter archive",
+            publication: "Archive",
+            url: "https://archive.example/native-note",
+            excerpt: "Another purported quote that must not be rendered.",
+          },
+        ],
+      },
+    };
+    const provider = new AiSdkResearchProvider({
+      model: streamedModel(output),
+      searchProvider: {
+        search: async (searchRequest) =>
+          searchRequest.query.includes("editorial political leaning")
+            ? [
+                {
+                  ...source(
+                    "publication-note",
+                    "https://research.example/native-note",
+                    publicationNote,
+                  ),
+                  contentKind: "search-note",
+                },
+              ]
+            : [
+                {
+                  ...source(
+                    "journalist-note",
+                    "https://archive.example/native-note",
+                    journalistNote,
+                  ),
+                  contentKind: "search-note",
+                },
+              ],
+      },
+    });
+
+    const result = await provider.contextBundle(request);
+
+    expect(result.politicalContext.signals[0]).toMatchObject({
+      citationKind: "search-summary",
+      excerpt: null,
+    });
+    expect(result.journalistContext.findings[0]).toMatchObject({
+      citationKind: "search-summary",
+      excerpt: null,
+    });
+  });
+
   it("preserves publication context when journalist search fails", async () => {
     const publicationExcerpt =
       "The outlet has maintained a durable conservative editorial orientation.";
@@ -463,6 +615,75 @@ describe("AiSdkResearchProvider context bundle", () => {
 
     expect(result.politicalContext.signals).toHaveLength(1);
     expect(result.failures?.journalistContext).toBeInstanceOf(Error);
+  });
+
+  it("records a publication-search failure alongside partial journalist context", async () => {
+    const journalistExcerpt = "The reporter has covered housing policy for several years.";
+    const model = streamedModel({
+      politicalContext: {
+        status: "empty",
+        summary: "No verified publication context.",
+        signals: [],
+      },
+      journalistContext: {
+        status: "ready",
+        summary: "The reporter has relevant public work.",
+        findings: [
+          {
+            id: "journalist-work",
+            summary: "The reporter has covered housing policy for several years.",
+            relevanceExplanation: "That recurring subject is relevant to this article.",
+            sourceTitle: "Reporter archive",
+            publication: "Archive",
+            url: "https://archive.example/reporter",
+            excerpt: journalistExcerpt,
+          },
+        ],
+      },
+    });
+    const provider = new AiSdkResearchProvider({
+      model,
+      searchProvider: {
+        search: async (searchRequest) => {
+          if (searchRequest.query.includes("editorial political leaning")) {
+            throw new Error("Publication search unavailable");
+          }
+          return [source("journalist", "https://archive.example/reporter", journalistExcerpt)];
+        },
+      },
+    });
+
+    const result = await provider.contextBundle(request);
+
+    expect(result.politicalContext.signals).toEqual([]);
+    expect(result.journalistContext.findings).toHaveLength(1);
+    expect(result.failures?.politicalContext).toBeInstanceOf(Error);
+    expect(result.failures?.journalistContext).toBeUndefined();
+    expect(model.doStreamCalls).toHaveLength(1);
+  });
+
+  it("retains both search diagnostics when neither context source pool has results", async () => {
+    const model = streamedModel({});
+    const provider = new AiSdkResearchProvider({
+      model,
+      searchProvider: {
+        search: async (searchRequest) => {
+          throw new Error(
+            searchRequest.query.includes("editorial political leaning")
+              ? "Publication search unavailable"
+              : "Journalist search unavailable",
+          );
+        },
+      },
+    });
+
+    const result = await provider.contextBundle(request);
+
+    expect(result.politicalContext.signals).toEqual([]);
+    expect(result.journalistContext.findings).toEqual([]);
+    expect(result.failures?.politicalContext).toBeInstanceOf(Error);
+    expect(result.failures?.journalistContext).toBeInstanceOf(Error);
+    expect(model.doStreamCalls).toHaveLength(0);
   });
 
   it("rejects syndicated aggregator copies as journalist context", async () => {
@@ -515,6 +736,113 @@ describe("AiSdkResearchProvider context bundle", () => {
     });
   });
 
+  it("rejects personal and social-media hosts as journalist evidence", async () => {
+    const linkedinExcerpt = "A profile lists the reporter's housing-policy work.";
+    const youtubeExcerpt = "A channel description discusses the reporter's recent work.";
+    const output = {
+      politicalContext: {
+        status: "empty",
+        summary: "No verified political context.",
+        signals: [],
+      },
+      journalistContext: {
+        status: "ready",
+        summary: "Social profiles describe the reporter's work.",
+        findings: [
+          {
+            id: "linkedin-profile",
+            summary: "A profile describes the reporter's housing-policy work.",
+            relevanceExplanation: "The subject overlaps with the current article.",
+            sourceTitle: "Reporter profile",
+            publication: "LinkedIn",
+            url: "https://www.linkedin.com/in/a-reporter",
+            excerpt: linkedinExcerpt,
+          },
+          {
+            id: "youtube-channel",
+            summary: "A channel describes the reporter's recent work.",
+            relevanceExplanation: "The subject overlaps with the current article.",
+            sourceTitle: "Reporter channel",
+            publication: "YouTube",
+            url: "https://youtube.com/@a-reporter",
+            excerpt: youtubeExcerpt,
+          },
+        ],
+      },
+    };
+    const provider = new AiSdkResearchProvider({
+      model: streamedModel(output),
+      searchProvider: {
+        search: async (searchRequest) =>
+          searchRequest.query.includes("editorial political leaning")
+            ? []
+            : [
+                source(
+                  "linkedin-profile",
+                  "https://www.linkedin.com/in/a-reporter",
+                  linkedinExcerpt,
+                ),
+                source("youtube-channel", "https://youtube.com/@a-reporter", youtubeExcerpt),
+              ],
+      },
+    });
+
+    const result = await provider.contextBundle(request);
+
+    expect(result.journalistContext).toMatchObject({
+      status: "empty",
+      findings: [],
+      emptyReason: "no-verified-evidence",
+    });
+  });
+
+  it("rejects social-media sources for political journalist-work signals", async () => {
+    const socialExcerpt = "The reporter describes their work as conservative commentary.";
+    const output = {
+      politicalContext: {
+        status: "ready",
+        summary: "A social profile claims an ideological orientation.",
+        signals: [
+          {
+            id: "social-right",
+            sourceKind: "journalist-work",
+            subject: "A. Reporter",
+            score: 1.2,
+            direction: "right",
+            strength: 0.25,
+            relevance: 0.8,
+            explanation: "The profile describes the reporter's work as conservative.",
+            sourceTitle: "Reporter post",
+            publication: "X",
+            url: "https://x.com/a-reporter/status/123",
+            excerpt: socialExcerpt,
+          },
+        ],
+      },
+      journalistContext: {
+        status: "empty",
+        summary: "No verified journalist context.",
+        findings: [],
+      },
+    };
+    const provider = new AiSdkResearchProvider({
+      model: streamedModel(output),
+      searchProvider: {
+        search: async (searchRequest) =>
+          searchRequest.query.includes("editorial political leaning")
+            ? []
+            : [source("social-right", "https://x.com/a-reporter/status/123", socialExcerpt)],
+      },
+    });
+
+    const result = await provider.contextBundle(request);
+
+    expect(result.politicalContext).toMatchObject({
+      status: "empty",
+      signals: [],
+    });
+  });
+
   it("rejects a political-context score unsupported by the cited excerpt", async () => {
     const publicationExcerpt = "The outlet was founded in 1990.";
     const output = {
@@ -562,6 +890,77 @@ describe("AiSdkResearchProvider context bundle", () => {
     });
   });
 
+  it("does not treat a negated political label as directional evidence", async () => {
+    const publicationExcerpt =
+      "The independent assessment says Example News is not right-leaning and instead rates it centrist.";
+    const output = {
+      politicalContext: {
+        status: "ready",
+        summary: "The assessment explicitly rates the outlet as centrist.",
+        signals: [
+          {
+            id: "negated-right",
+            sourceKind: "publication-history",
+            subject: "Example News",
+            score: 1.2,
+            direction: "right",
+            strength: 0.35,
+            relevance: 0.9,
+            explanation: "The assessment describes the outlet as right-leaning.",
+            sourceTitle: "Outlet assessment",
+            publication: "Media Research",
+            url: "https://research.example/outlet-assessment",
+            excerpt: publicationExcerpt,
+          },
+          {
+            id: "explicit-center",
+            sourceKind: "publication-history",
+            subject: "Example News",
+            score: 0,
+            direction: "center",
+            strength: 0.3,
+            relevance: 0.9,
+            explanation: "The assessment explicitly rates the outlet as centrist.",
+            sourceTitle: "Outlet assessment",
+            publication: "Media Research",
+            url: "https://research.example/outlet-assessment",
+            excerpt: publicationExcerpt,
+          },
+        ],
+      },
+      journalistContext: {
+        status: "empty",
+        summary: "No verified journalist context.",
+        findings: [],
+      },
+    };
+    const provider = new AiSdkResearchProvider({
+      model: streamedModel(output),
+      searchProvider: {
+        search: async (searchRequest) =>
+          searchRequest.query.includes("editorial political leaning")
+            ? [
+                source(
+                  "publication",
+                  "https://research.example/outlet-assessment",
+                  publicationExcerpt,
+                ),
+              ]
+            : [],
+      },
+    });
+
+    const result = await provider.contextBundle(request);
+
+    expect(result.politicalContext.signals).toEqual([
+      expect.objectContaining({
+        id: "explicit-center",
+        direction: "center",
+        score: 0,
+      }),
+    ]);
+  });
+
   it("keeps the adopted spectrum and contextual boundary explicit", () => {
     const prompt = buildContextBundlePrompt(createResearchBrief(request, claims), [], []);
 
@@ -573,6 +972,37 @@ describe("AiSdkResearchProvider context bundle", () => {
 });
 
 describe("research queries", () => {
+  it("shares claim-linked article passages without exceeding the context budget", () => {
+    const paragraphs = Array.from({ length: 20 }, (_, index) => ({
+      id: `p-${index + 1}`,
+      index,
+      kind: "paragraph" as const,
+      speaker: null,
+      text: `${index === 17 ? "Priority passage. " : ""}${"context ".repeat(120)}`,
+    }));
+    const brief = createResearchBrief(
+      {
+        ...request,
+        article: {
+          ...request.article,
+          paragraphs,
+        },
+      },
+      [
+        {
+          ...claims[0]!,
+          paragraphIds: ["p-18"],
+        },
+      ],
+    );
+
+    expect(brief.passages[0]?.id).toBe("p-18");
+    expect(brief.modelContext).toContain("Priority passage.");
+    expect(
+      brief.passages.reduce((total, passage) => total + passage.text.length, 0),
+    ).toBeLessThanOrEqual(4_800);
+  });
+
   it("focuses evidence retrieval on the strongest claims", () => {
     const brief = createResearchBrief(request, [
       ...claims,

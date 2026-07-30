@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { calculateCompass } from "@perspectica/compass";
 import {
   AdditionalContextResultSchema,
@@ -42,6 +41,7 @@ export interface ContextResearchBundle {
   politicalContext: PoliticalContextResult;
   journalistContext: JournalistContextResult;
   failures?: {
+    politicalContext?: unknown;
     journalistContext?: unknown;
   };
 }
@@ -149,6 +149,10 @@ export interface ResearchBrief {
     importance: number;
     queryHints: readonly string[];
   }>[];
+  readonly passages: readonly Readonly<{
+    id: string;
+    text: string;
+  }>[];
   readonly queryTerms: string;
   readonly modelContext: string;
 }
@@ -196,6 +200,34 @@ export function createResearchBrief(
     domain,
   });
   const frozenClaims = Object.freeze(compactClaims);
+  const relevantParagraphIds = new Set(claims.flatMap((claim) => claim.paragraphIds));
+  const candidatePassages = request.article.paragraphs
+    .filter(
+      (paragraph) =>
+        relevantParagraphIds.has(paragraph.id) ||
+        paragraph.kind === "heading" ||
+        paragraph.kind === "quote",
+    )
+    .concat(
+      request.article.paragraphs.filter(
+        (paragraph) =>
+          !relevantParagraphIds.has(paragraph.id) &&
+          paragraph.kind !== "heading" &&
+          paragraph.kind !== "quote",
+      ),
+    );
+  let passageCharacters = 0;
+  const passages = Object.freeze(
+    candidatePassages
+      .flatMap((paragraph) => {
+        if (passageCharacters >= 4_800) return [];
+        const text = compactText(paragraph.text, Math.min(700, 4_800 - passageCharacters));
+        if (!text) return [];
+        passageCharacters += text.length;
+        return [Object.freeze({ id: paragraph.id, text })];
+      })
+      .slice(0, 14),
+  );
   const queryTerms = compactText(
     compactClaims.map((claim) => claim.queryHints[0] ?? claim.text).join(" "),
     600,
@@ -204,8 +236,9 @@ export function createResearchBrief(
   return Object.freeze({
     article,
     claims: frozenClaims,
+    passages,
     queryTerms,
-    modelContext: JSON.stringify({ article, claims: frozenClaims, queryTerms }),
+    modelContext: JSON.stringify({ article, claims: frozenClaims, passages, queryTerms }),
   });
 }
 
@@ -507,7 +540,12 @@ async function* runAgenticResearchPipeline(
 ): AsyncGenerator<AnalysisEvent> {
   const fallbackDossier = createFallbackDossier(request);
   const tasks = new Map<AgenticTaskKind, Promise<AgenticTaskCompletion>>();
+  const startedTasks = new Set<AgenticTaskKind>();
   const startTask = <T>(kind: AgenticTaskKind, invoke: () => Promise<T>) => {
+    if (startedTasks.has(kind)) {
+      throw new Error(`Analysis task "${kind}" was started more than once.`);
+    }
+    startedTasks.add(kind);
     tasks.set(
       kind,
       settle(invoke).then((settlement): AgenticTaskCompletion => ({ kind, settlement })),
@@ -517,6 +555,11 @@ async function* runAgenticResearchPipeline(
   startTask("journalist", () =>
     dependencies.research.analyzeJournalistContext(request, fallbackDossier, signal),
   );
+  for (const section of ["supporting", "contradicting", "additional-context"] as const) {
+    startTask(section, () =>
+      dependencies.research.analyzeEvidence(section, request, fallbackDossier, signal),
+    );
+  }
 
   let lensResolved = false;
   let compassEvidence: CompassEvidence[] = [];
@@ -539,8 +582,72 @@ async function* runAgenticResearchPipeline(
   const evidenceErrors: Partial<
     Record<"supporting" | "contradicting" | "additional-context", unknown>
   > = {};
-  let evidenceRemaining = 3;
-  let evidenceEmitted = false;
+  const evidenceSnapshots = new Map<
+    "supporting" | "contradicting" | "additional-context",
+    string
+  >();
+  const evidenceFailureEmitted = new Set<"supporting" | "contradicting" | "additional-context">();
+
+  /**
+   * Evidence is intentionally emitted as soon as its lane settles. The
+   * supporting lane may be revised once contradicting evidence arrives (to
+   * enforce URL exclusivity), so the same ready event can be emitted again as
+   * a replacement snapshot. Consumers already reduce ready events by section.
+   */
+  const buildEvidenceEvent = (
+    section: "supporting" | "contradicting" | "additional-context",
+  ): AnalysisEvent | null => {
+    const error = evidenceErrors[section];
+    if (error) {
+      if (evidenceFailureEmitted.has(section)) return null;
+      evidenceFailureEmitted.add(section);
+      failedSections.add(section);
+      return sectionFailure(section, analysisId, error, now);
+    }
+    const result = evidenceResults[section];
+    if (!result) return null;
+
+    const contradictingUrls = evidenceResults.contradicting
+      ? evidenceUrlSet(evidenceResults.contradicting)
+      : new Set<string>();
+    const supporting = evidenceResults.supporting
+      ? removeEvidenceUrls(evidenceResults.supporting, contradictingUrls)
+      : undefined;
+    const usedEvidenceUrls = new Set([
+      ...contradictingUrls,
+      ...(supporting ? evidenceUrlSet(supporting) : []),
+    ]);
+    const additionalContext = evidenceResults["additional-context"]
+      ? removeEvidenceUrls(evidenceResults["additional-context"], usedEvidenceUrls)
+      : undefined;
+    const candidate =
+      section === "supporting"
+        ? supporting
+          ? finalizeEvidenceResult(supporting, "supporting")
+          : null
+        : section === "contradicting"
+          ? evidenceResults.contradicting
+            ? finalizeEvidenceResult(evidenceResults.contradicting, "contradicting")
+            : null
+          : additionalContext
+            ? finalizeEvidenceResult(additionalContext, "additional-context")
+            : null;
+    if (!candidate) return null;
+
+    const serialized = JSON.stringify(candidate);
+    if (evidenceSnapshots.get(section) === serialized) return null;
+    evidenceSnapshots.set(section, serialized);
+    return createEvent(
+      section === "supporting"
+        ? "supporting.ready"
+        : section === "contradicting"
+          ? "contradicting.ready"
+          : "additionalContext.ready",
+      analysisId,
+      candidate,
+      now,
+    );
+  };
 
   while (tasks.size > 0) {
     const completed = await Promise.race(tasks.values());
@@ -594,28 +701,25 @@ async function* runAgenticResearchPipeline(
       startTask("bias", () =>
         dependencies.research.analyzeBias(request, dossier, candidates, signal),
       );
-      startTask("supporting", () =>
-        dependencies.research.analyzeEvidence("supporting", request, dossier, signal),
-      );
-      startTask("contradicting", () =>
-        dependencies.research.analyzeEvidence("contradicting", request, dossier, signal),
-      );
-      startTask("additional-context", () =>
-        dependencies.research.analyzeEvidence("additional-context", request, dossier, signal),
-      );
       continue;
     }
 
     if (completed.kind === "political") {
       political = completed.settlement as TaskSettlement<PoliticalContextResult>;
+      if (!political.ok) {
+        if (!failedSections.has("compass")) {
+          failedSections.add("compass");
+          yield sectionFailure("compass", analysisId, political.error, now);
+        }
+        continue;
+      }
       if (lensResolved && !finalCompassEmitted && !failedSections.has("compass")) {
-        const context = political.ok ? political.data : undefined;
         finalCompassEmitted = true;
         yield createEvent(
           "compass.ready",
           analysisId,
           calculateCompass(compassEvidence, {
-            ...(context ? { context } : {}),
+            context: political.data,
             publication: request.article.publication,
           }),
           now,
@@ -677,7 +781,6 @@ async function* runAgenticResearchPipeline(
       continue;
     }
 
-    evidenceRemaining -= 1;
     const evidenceKind = completed.kind as "supporting" | "contradicting" | "additional-context";
     if (completed.settlement.ok) {
       if (evidenceKind === "additional-context") {
@@ -688,49 +791,16 @@ async function* runAgenticResearchPipeline(
     } else {
       evidenceErrors[evidenceKind] = completed.settlement.error;
     }
+    const event = buildEvidenceEvent(evidenceKind);
+    if (event) yield event;
+  }
 
-    if (evidenceRemaining === 0 && !evidenceEmitted) {
-      evidenceEmitted = true;
-      const contradicting = evidenceResults.contradicting;
-      const supporting = evidenceResults.supporting;
-      const additionalContext = evidenceResults["additional-context"];
-      const contradictionUrls = contradicting ? evidenceUrlSet(contradicting) : new Set<string>();
-      const exclusiveSupporting = supporting
-        ? removeEvidenceUrls(supporting, contradictionUrls)
-        : undefined;
-      const usedEvidenceUrls = new Set([
-        ...contradictionUrls,
-        ...(exclusiveSupporting ? evidenceUrlSet(exclusiveSupporting) : []),
-      ]);
-      const exclusiveContext = additionalContext
-        ? removeEvidenceUrls(additionalContext, usedEvidenceUrls)
-        : undefined;
-      const finalSupporting = exclusiveSupporting
-        ? finalizeEvidenceResult(exclusiveSupporting, "supporting")
-        : undefined;
-      const finalContradicting = contradicting
-        ? finalizeEvidenceResult(contradicting, "contradicting")
-        : undefined;
-      const finalContext = exclusiveContext
-        ? finalizeEvidenceResult(exclusiveContext, "additional-context")
-        : undefined;
-
-      for (const section of ["supporting", "contradicting", "additional-context"] as const) {
-        const error = evidenceErrors[section];
-        if (error) {
-          failedSections.add(section);
-          yield sectionFailure(section, analysisId, error, now);
-          continue;
-        }
-        if (section === "supporting" && finalSupporting) {
-          yield createEvent("supporting.ready", analysisId, finalSupporting, now);
-        } else if (section === "contradicting" && finalContradicting) {
-          yield createEvent("contradicting.ready", analysisId, finalContradicting, now);
-        } else if (section === "additional-context" && finalContext) {
-          yield createEvent("additionalContext.ready", analysisId, finalContext, now);
-        }
-      }
-    }
+  // A later contradicting result can displace a URL that was already shown in
+  // Supporting Information. Reconcile once all lanes have settled, without
+  // delaying the first useful section for the reader.
+  for (const section of ["supporting", "contradicting", "additional-context"] as const) {
+    const event = buildEvidenceEvent(section);
+    if (event) yield event;
   }
 
   if (provisionalCompassEmitted && !finalCompassEmitted && !failedSections.has("compass")) {
@@ -785,9 +855,23 @@ function sectionFailure(
   const rawMessage =
     error instanceof Error ? error.message : typeof error === "string" ? error : "";
   const timedOut = /(?:time(?:d|out)|aborted)/i.test(rawMessage);
-  const message = timedOut
-    ? "This section took longer than expected. Try again."
-    : "This section could not be completed. Try again.";
+  const providerUnavailable =
+    /(?:exa|web search|search provider).*(?:401|403|429|failed|unavailable)/i.test(rawMessage);
+  const rateLimited = /(?:429|rate.?limit|too many requests)/i.test(rawMessage);
+  const authenticationFailed =
+    /(?:401|unauthorized|session expired|connect chatgpt|authentication)/i.test(rawMessage);
+  const malformed = /(?:no object generated|parse|schema|structured output)/i.test(rawMessage);
+  const message = authenticationFailed
+    ? "Your ChatGPT connection needs attention. Reconnect in Settings, then try again."
+    : rateLimited
+      ? "The selected provider is temporarily busy. Wait a moment, then try again."
+      : providerUnavailable
+        ? "Web research is unavailable. Check the search provider in Settings, then try again."
+        : timedOut
+          ? "This section took longer than expected. Try again."
+          : malformed
+            ? "The model returned an incomplete research result. Try again."
+            : "This section could not be completed. Try again.";
 
   return createEvent(
     "section.failed",
@@ -832,7 +916,7 @@ export async function* runAnalysis(
   signal?: AbortSignal,
 ): AsyncGenerator<AnalysisEvent> {
   const now = dependencies.now ?? (() => new Date());
-  const createId = dependencies.createId ?? randomUUID;
+  const createId = dependencies.createId ?? (() => globalThis.crypto.randomUUID());
   const analysisId = createId();
   const startedAt = now();
   const metadata: AnalysisMetadata = {
@@ -926,9 +1010,11 @@ export async function* runAnalysis(
     if (completed.kind === "lens") {
       lensPending = false;
       if (!completed.settlement.ok) {
-        failedSections.add("compass");
+        if (!failedSections.has("compass")) {
+          failedSections.add("compass");
+          yield sectionFailure("compass", analysisId, completed.settlement.error, now);
+        }
         failedSections.add("bias");
-        yield sectionFailure("compass", analysisId, completed.settlement.error, now);
         yield sectionFailure("bias", analysisId, completed.settlement.error, now);
         continue;
       }
@@ -958,9 +1044,11 @@ export async function* runAnalysis(
       }
 
       if (articleCompass) {
-        if (!contextPending) {
+        if (!contextPending && !failedSections.has("compass")) {
           const context =
-            contextSettlement?.ok === true ? contextSettlement.data.politicalContext : undefined;
+            contextSettlement?.ok === true && !contextSettlement.data.failures?.politicalContext
+              ? contextSettlement.data.politicalContext
+              : undefined;
           yield createEvent(
             "compass.ready",
             analysisId,
@@ -970,7 +1058,11 @@ export async function* runAnalysis(
             }),
             now,
           );
-        } else if (articleCompass.basis !== "calibrated-fallback") {
+        } else if (
+          contextPending &&
+          !failedSections.has("compass") &&
+          articleCompass.basis !== "calibrated-fallback"
+        ) {
           provisionalCompassEmitted = true;
           yield createEvent("compass.provisional", analysisId, articleCompass, now);
         }
@@ -982,6 +1074,17 @@ export async function* runAnalysis(
       contextPending = false;
       contextSettlement = completed.settlement;
       if (contextSettlement.ok) {
+        if (contextSettlement.data.failures?.politicalContext) {
+          if (!failedSections.has("compass")) {
+            failedSections.add("compass");
+            yield sectionFailure(
+              "compass",
+              analysisId,
+              contextSettlement.data.failures.politicalContext,
+              now,
+            );
+          }
+        }
         if (contextSettlement.data.failures?.journalistContext) {
           failedSections.add("journalist-context");
           yield sectionFailure(
@@ -1002,16 +1105,26 @@ export async function* runAnalysis(
           );
         }
       } else {
-        failedSections.add("journalist-context");
-        yield sectionFailure("journalist-context", analysisId, contextSettlement.error, now);
+        if (!failedSections.has("compass")) {
+          failedSections.add("compass");
+          yield sectionFailure("compass", analysisId, contextSettlement.error, now);
+        }
+        if (!failedSections.has("journalist-context")) {
+          failedSections.add("journalist-context");
+          yield sectionFailure("journalist-context", analysisId, contextSettlement.error, now);
+        }
       }
 
       if (
         !lensPending &&
         articleCompass &&
+        !failedSections.has("compass") &&
         (provisionalCompassEmitted || articleCompass.basis === "calibrated-fallback")
       ) {
-        const context = contextSettlement.ok ? contextSettlement.data.politicalContext : undefined;
+        const context =
+          contextSettlement.ok && !contextSettlement.data.failures?.politicalContext
+            ? contextSettlement.data.politicalContext
+            : undefined;
         yield createEvent(
           "compass.ready",
           analysisId,

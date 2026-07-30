@@ -7,10 +7,10 @@ import type {
   ExternalSource,
   SourceListResult,
 } from "@perspectica/contracts";
+import { normalizeCanonicalUrl } from "@perspectica/contracts";
 
 const SOURCE_LIST_LIMIT = 8;
 const SOURCE_LIST_PER_HOST_LIMIT = 2;
-const TRACKING_PARAMETERS = new Set(["fbclid", "gclid", "mc_cid", "mc_eid", "ref"]);
 const UTILITY_LINK_LABEL =
   /^(see all topics?|all topics?|follow|home|homepage|read more|learn more|related|more|next|previous|sign up|subscribe|advertisement)$/i;
 const PROMOTIONAL_LINK_LABEL =
@@ -219,23 +219,6 @@ export function validateBiasFindings(
   };
 }
 
-function normalizedSourceUrl(value: string): string | null {
-  try {
-    const url = new URL(value);
-    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-    url.hash = "";
-    for (const key of [...url.searchParams.keys()]) {
-      if (key.startsWith("utm_") || TRACKING_PARAMETERS.has(key)) {
-        url.searchParams.delete(key);
-      }
-    }
-    url.pathname = url.pathname.replace(/\/+$/, "") || "/";
-    return url.toString();
-  } catch {
-    return null;
-  }
-}
-
 function normalizedHost(value: string): string {
   return value.toLocaleLowerCase("en-US").replace(/^www\./, "");
 }
@@ -381,11 +364,11 @@ export function buildSourceList(article: ArticleDocument): SourceListResult {
     if (!link.paragraphId || UTILITY_LINK_LABEL.test(cleanCitationText(link.label))) {
       return [];
     }
-    const normalized = normalizedSourceUrl(link.url);
-    if (!normalized || seen.has(normalized.toLocaleLowerCase("en-US"))) return [];
+    const normalized = normalizeCanonicalUrl(link.url);
+    if (!normalized || seen.has(normalized)) return [];
 
     const url = new URL(normalized);
-    if (normalized === normalizedSourceUrl(article.canonicalUrl)) return [];
+    if (normalized === normalizeCanonicalUrl(article.canonicalUrl)) return [];
     if (
       samePublicationHost(url.hostname, articleHost) &&
       SAME_PUBLICATION_NAVIGATION_PATH.test(url.pathname)
@@ -402,7 +385,7 @@ export function buildSourceList(article: ArticleDocument): SourceListResult {
     if (!isLikelyOriginalCitation(link, url, articleHost, paragraphText)) {
       return [];
     }
-    seen.add(normalized.toLocaleLowerCase("en-US"));
+    seen.add(normalized);
     return [
       {
         link,
@@ -445,8 +428,8 @@ export function deduplicateExternalSources(
   const deduplicated: ExternalSource[] = [];
 
   for (const source of sources) {
-    const normalized = source.url.toLocaleLowerCase("en-US");
-    if (seen.has(normalized)) continue;
+    const normalized = normalizeCanonicalUrl(source.url);
+    if (!normalized || seen.has(normalized)) continue;
     seen.add(normalized);
     deduplicated.push(source);
     if (deduplicated.length >= limit) break;
