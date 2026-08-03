@@ -11,8 +11,14 @@ export class PreferencesStore {
   constructor(private readonly storage: JsonStorageArea) {}
 
   async get(): Promise<ExtensionPreferences> {
-    const parsed = ExtensionPreferencesSchema.safeParse(await this.storage.get(PREFERENCES_KEY));
-    return parsed.success ? parsed.data : DEFAULT_EXTENSION_PREFERENCES;
+    const raw = await this.storage.get(PREFERENCES_KEY);
+    const parsed = ExtensionPreferencesSchema.safeParse(raw);
+    if (!parsed.success) return DEFAULT_EXTENSION_PREFERENCES;
+    // Parsing normalizes the retired `fast` mode to canonical `quick`; persist
+    // the normalized record so subsequent resume/fingerprint paths agree.
+    if (JSON.stringify(raw) !== JSON.stringify(parsed.data))
+      await this.storage.set(PREFERENCES_KEY, parsed.data);
+    return parsed.data;
   }
 
   async set(preferences: ExtensionPreferences): Promise<void> {

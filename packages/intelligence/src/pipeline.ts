@@ -1,5 +1,9 @@
 import { PipelineEventSchema, type PipelineEvent } from "@perspectica/contracts/events";
-import { AnalysisMetadataSchema, type ArticleDocument } from "@perspectica/contracts";
+import {
+  AnalysisMetadataSchema,
+  type ArticleDocument,
+  type ResearchDepth,
+} from "@perspectica/contracts";
 import type { ArticleIndex } from "@perspectica/contracts/article";
 import type { EvidenceRetriever } from "@perspectica/contracts/evidence";
 import type { AnalysisPlan, ReportSection } from "@perspectica/contracts/report";
@@ -8,7 +12,11 @@ import {
   INTELLIGENCE_PROMPT_VERSION,
 } from "@perspectica/contracts/limits";
 import { buildArticleIndex } from "@perspectica/extraction";
-import { resolveAnalysisBudget, type AnalysisBudget } from "./budgets";
+import {
+  resolveAnalysisBudget,
+  type AnalysisBudget,
+  type LegacyAnalysisBudgetMode,
+} from "./budgets";
 import { createAnalysisPlan } from "./planning/lens";
 import { EvidenceLedger } from "./evidence/source-ledger";
 import { retryMissingSections as retryRetrieval, runRetrieval } from "./retrieval/coordinator";
@@ -25,7 +33,8 @@ export interface AnalysisInput {
   analysisId?: string;
   modelVersion?: string;
   reasoningEffort?: "none" | "low" | "medium" | "high" | "xhigh" | "max";
-  mode?: AnalysisBudget["mode"];
+  mode?: AnalysisBudget["mode"] | LegacyAnalysisBudgetMode;
+  depth?: ResearchDepth;
   signal?: AbortSignal;
   now?: () => Date;
   createId?: () => string;
@@ -111,6 +120,7 @@ export async function* analyzeArticle(input: AnalysisInput): AsyncGenerator<Pipe
     reasoningEffort: input.reasoningEffort ?? "medium",
     startedAt: startedAt.toISOString(),
     contentType: input.article.contentType,
+    researchDepth: input.depth ?? (budget.mode === "quick" ? "quick" : budget.mode),
   });
   const emit = (type: PipelineEvent["type"], data: unknown): PipelineEvent => {
     const event = createEvent(type, analysisId, data, now);

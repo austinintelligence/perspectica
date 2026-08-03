@@ -21,6 +21,7 @@ import {
 } from "../../src/runtime/messages";
 import { ExaEvidenceRetriever } from "../../src/providers/exa-evidence";
 import { NativeChatGptEvidenceRetriever } from "../../src/providers/chatgpt-evidence";
+import { FreeEvidenceRetriever } from "../../src/providers/free-evidence";
 import { IndexedDbAnalysisArtifactStore } from "../../src/storage/analysis-artifacts";
 import { EvidenceCache } from "../../src/storage/evidence-cache";
 import { describeError, redactText, serializeRedacted } from "../../src/runtime/redaction";
@@ -29,13 +30,66 @@ const activeJobs = new Map<string, { controller: AbortController; runToken: stri
 const completedArtifacts = new Map<string, AnalysisArtifacts>();
 const artifactStore = new IndexedDbAnalysisArtifactStore();
 const telemetryTails = new Map<string, Promise<void>>();
+const runCaches = new Map<string, EvidenceCache>();
+const OFFSCREEN_IDLE_CLOSE_MS = 5_000;
+let offscreenCloseTimer: ReturnType<typeof setTimeout> | null = null;
 
 function artifactKey(jobId: string, runToken: string): string {
   return `${jobId}:${runToken}`;
 }
 
+function runCacheScope(
+  jobId: string,
+  runToken: string,
+  cacheScope: string | null | undefined,
+): string {
+  const providerScope = (cacheScope?.trim() || "global").slice(0, 190);
+  return `run:${providerScope}:${jobId}:${runToken}`.slice(0, 256);
+}
+
+function cacheForRun(
+  jobId: string,
+  runToken: string,
+  cacheScope: string | null | undefined,
+): EvidenceCache {
+  const key = artifactKey(jobId, runToken);
+  const existing = runCaches.get(key);
+  if (existing) return existing;
+  const cache = new EvidenceCache(runCacheScope(jobId, runToken, cacheScope));
+  runCaches.set(key, cache);
+  return cache;
+}
+
+async function clearRunCache(jobId: string, runToken: string): Promise<void> {
+  const key = artifactKey(jobId, runToken);
+  const cache = runCaches.get(key);
+  runCaches.delete(key);
+  await cache?.clear().catch((error: unknown) => {
+    console.warn("[perspectica] run-scoped evidence cache cleanup failed", describeError(error));
+  });
+}
+
+function cancelScheduledOffscreenClose(): void {
+  if (offscreenCloseTimer !== null) {
+    clearTimeout(offscreenCloseTimer);
+    offscreenCloseTimer = null;
+  }
+}
+
+function scheduleOffscreenClose(): void {
+  cancelScheduledOffscreenClose();
+  offscreenCloseTimer = setTimeout(() => {
+    offscreenCloseTimer = null;
+    if (activeJobs.size > 0) return;
+    void chrome.offscreen.closeDocument().catch((error: unknown) => {
+      console.debug("[perspectica] offscreen document was already closed", describeError(error));
+    });
+  }, OFFSCREEN_IDLE_CLOSE_MS);
+}
+
 function queueTelemetry(
   jobId: string,
+  runToken: string,
   entry: Omit<AnalysisLogInput, "timestamp"> & { timestamp?: string },
 ): Promise<void> {
   const sanitized: AnalysisLogInput = {
@@ -49,7 +103,7 @@ function queueTelemetry(
   const previous = telemetryTails.get(jobId) ?? Promise.resolve();
   const next: Promise<void> = previous
     .catch(() => undefined)
-    .then(() => sendInternal({ type: "internal.analysis.log", jobId, entry: sanitized }))
+    .then(() => sendInternal({ type: "internal.analysis.log", jobId, runToken, entry: sanitized }))
     .then(() => undefined)
     .catch((error: unknown) => {
       console.warn("[perspectica] telemetry persistence failed", describeError(error));
@@ -83,8 +137,8 @@ async function sendInternal<T>(request: InternalRequestInput, attempts = 3): Pro
   throw lastError instanceof Error ? lastError : new Error("The extension runtime is unavailable.");
 }
 
-function logTelemetry(jobId: string, telemetry: PipelineTelemetry): void {
-  void queueTelemetry(jobId, {
+function logTelemetry(jobId: string, runToken: string, telemetry: PipelineTelemetry): void {
+  void queueTelemetry(jobId, runToken, {
     level: "info",
     scope: "pipeline",
     event: "phase.snapshot",
@@ -106,9 +160,11 @@ function logTelemetry(jobId: string, telemetry: PipelineTelemetry): void {
 
 async function createRetriever(
   jobId: string,
+  runToken: string,
   modelId: string,
   reasoningEffort: ReasoningEffort,
   providerKind: SearchProviderKind,
+  cacheScope: string | null | undefined,
 ): Promise<{ model: ReturnType<ReturnType<typeof createChatGPT>>; retriever: EvidenceRetriever }> {
   const chatgpt = createChatGPT({
     credentials: () => sendInternal<ChatGPTTokens>({ type: "internal.auth.getTokens" }),
@@ -116,6 +172,7 @@ async function createRetriever(
     reasoningEffort,
     textVerbosity: "low",
   });
+  const cache = cacheForRun(jobId, runToken, cacheScope);
   if (providerKind === "exa") {
     const secret = await sendInternal<{ apiKey: string }>({
       type: "internal.providers.getSecret",
@@ -127,7 +184,7 @@ async function createRetriever(
         secret.apiKey,
         undefined,
         (diagnostics) => {
-          void queueTelemetry(jobId, {
+          void queueTelemetry(jobId, runToken, {
             level: diagnostics.outcome === "failed" ? "error" : "debug",
             scope: "provider.exa",
             event: `mission.${diagnostics.outcome}`,
@@ -135,7 +192,25 @@ async function createRetriever(
             payload: serializeRedacted(diagnostics),
           });
         },
-        new EvidenceCache(),
+        cache,
+      ),
+    };
+  }
+  if (providerKind === "free") {
+    return {
+      model: chatgpt(modelId),
+      retriever: new FreeEvidenceRetriever(
+        globalThis.fetch.bind(globalThis),
+        (diagnostics) => {
+          void queueTelemetry(jobId, runToken, {
+            level: diagnostics.outcome === "failed" ? "error" : "debug",
+            scope: "provider.free",
+            event: `mission.${diagnostics.outcome}`,
+            message: `Free research mission ${diagnostics.missionId} ${diagnostics.outcome}.`,
+            payload: serializeRedacted(diagnostics),
+          });
+        },
+        cache,
       ),
     };
   }
@@ -145,7 +220,7 @@ async function createRetriever(
       chatgpt,
       modelId,
       (diagnostics) => {
-        void queueTelemetry(jobId, {
+        void queueTelemetry(jobId, runToken, {
           level: diagnostics.outcome === "failed" ? "error" : "debug",
           scope: "provider.chatgpt",
           event: `global-search.${diagnostics.outcome}`,
@@ -153,7 +228,7 @@ async function createRetriever(
           payload: serializeRedacted(diagnostics),
         });
       },
-      new EvidenceCache(),
+      cache,
     ),
   };
 }
@@ -164,6 +239,7 @@ async function testSearchProvider(
     { type: "offscreen.providers.test" }
   >,
 ): Promise<{ available: true; sourceCount: number }> {
+  if (command.provider === "free") return { available: true, sourceCount: 0 };
   const chatgpt = createChatGPT({
     credentials: () => sendInternal<ChatGPTTokens>({ type: "internal.auth.getTokens" }),
     defaultModel: command.preferences.model,
@@ -171,7 +247,7 @@ async function testSearchProvider(
     textVerbosity: "low",
   });
   if (command.provider !== "chatgpt")
-    throw new Error("Only ChatGPT web search is tested in the analysis runtime.");
+    throw new Error("Exa API connectivity is tested from the settings key flow.");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 45_000);
   try {
@@ -217,6 +293,7 @@ async function runJob(
   >,
 ): Promise<void> {
   activeJobs.get(jobId)?.controller.abort();
+  cancelScheduledOffscreenClose();
   const controller = new AbortController();
   activeJobs.set(jobId, { controller, runToken: command.runToken });
   let sequence = command.initialSequence;
@@ -229,9 +306,11 @@ async function runJob(
     };
     const { model, retriever } = await createRetriever(
       jobId,
+      command.runToken,
       preferences.model,
       preferences.reasoningEffort,
       command.searchProvider,
+      command.cacheScope,
     );
     for await (const event of analyzeArticle({
       article: command.request.article,
@@ -241,8 +320,9 @@ async function runJob(
       modelVersion: preferences.model,
       reasoningEffort: preferences.reasoningEffort,
       mode: preferences.mode,
+      depth: preferences.depth,
       signal: controller.signal,
-      onTelemetry: (telemetry) => logTelemetry(jobId, telemetry),
+      onTelemetry: (telemetry) => logTelemetry(jobId, command.runToken, telemetry),
       onArtifacts: async (artifacts) => {
         for (const key of completedArtifacts.keys()) {
           if (key !== artifactKey(jobId, command.runToken)) completedArtifacts.delete(key);
@@ -251,7 +331,7 @@ async function runJob(
         await artifactStore.set(jobId, command.runToken, artifacts);
       },
     })) {
-      void queueTelemetry(jobId, {
+      void queueTelemetry(jobId, command.runToken, {
         timestamp: event.emittedAt,
         level: event.type === "analysis.failed" ? "error" : "info",
         scope: "pipeline.events",
@@ -300,7 +380,12 @@ async function runJob(
       }
     }
   } finally {
-    if (activeJobs.get(jobId)?.controller === controller) activeJobs.delete(jobId);
+    const ownsActiveJob = activeJobs.get(jobId)?.controller === controller;
+    if (ownsActiveJob) activeJobs.delete(jobId);
+    if (ownsActiveJob || activeJobs.get(jobId)?.runToken !== command.runToken) {
+      await clearRunCache(jobId, command.runToken);
+    }
+    if (activeJobs.size === 0) scheduleOffscreenClose();
   }
 }
 
@@ -312,6 +397,7 @@ async function runRetryJob(
   >,
 ): Promise<void> {
   activeJobs.get(jobId)?.controller.abort();
+  cancelScheduledOffscreenClose();
   const controller = new AbortController();
   activeJobs.set(jobId, { controller, runToken: command.runToken });
   let sequence = command.initialSequence;
@@ -344,9 +430,11 @@ async function runRetryJob(
     };
     const { model, retriever } = await createRetriever(
       jobId,
+      command.runToken,
       preferences.model,
       preferences.reasoningEffort,
       command.searchProvider,
+      command.cacheScope,
     );
     for await (const event of retryArticleSections({
       artifacts,
@@ -354,9 +442,9 @@ async function runRetryJob(
       adjudicator: createModelEvidenceAdjudicator(model),
       sections: command.sections,
       signal: controller.signal,
-      onTelemetry: (telemetry) => logTelemetry(jobId, telemetry),
+      onTelemetry: (telemetry) => logTelemetry(jobId, command.runToken, telemetry),
     })) {
-      void queueTelemetry(jobId, {
+      void queueTelemetry(jobId, command.runToken, {
         timestamp: event.emittedAt,
         level: event.type === "analysis.failed" ? "error" : "info",
         scope: "pipeline.events",
@@ -401,7 +489,12 @@ async function runRetryJob(
       }
     }
   } finally {
-    if (activeJobs.get(jobId)?.controller === controller) activeJobs.delete(jobId);
+    const ownsActiveJob = activeJobs.get(jobId)?.controller === controller;
+    if (ownsActiveJob) activeJobs.delete(jobId);
+    if (ownsActiveJob || activeJobs.get(jobId)?.runToken !== command.runToken) {
+      await clearRunCache(jobId, command.runToken);
+    }
+    if (activeJobs.size === 0) scheduleOffscreenClose();
   }
 }
 
@@ -414,14 +507,18 @@ chrome.runtime.onMessage.addListener((raw, sender, sendResponse) => {
     return false;
   }
   if (command.data.type === "offscreen.providers.test") {
-    void testSearchProvider(command.data).then(
-      (result) => sendResponse({ ok: true, data: result }),
-      (error: unknown) =>
-        sendResponse({
-          ok: false,
-          error: publicError(error, "ChatGPT web search is not available for this account."),
-        }),
-    );
+    void testSearchProvider(command.data)
+      .then(
+        (result) => sendResponse({ ok: true, data: result }),
+        (error: unknown) =>
+          sendResponse({
+            ok: false,
+            error: publicError(error, "ChatGPT web search is not available for this account."),
+          }),
+      )
+      .finally(() => {
+        if (activeJobs.size === 0) scheduleOffscreenClose();
+      });
     return true;
   }
   if (command.data.type === "offscreen.analysis.cancel") {
@@ -430,6 +527,7 @@ chrome.runtime.onMessage.addListener((raw, sender, sendResponse) => {
     if (accepted && active) {
       active.controller.abort();
       activeJobs.delete(command.data.jobId);
+      scheduleOffscreenClose();
     }
     sendResponse({ accepted, cancelled: accepted });
     return false;

@@ -91,11 +91,11 @@ export function createModelEvidenceAdjudicator(
         system: SYSTEM_PROMPT,
         prompt,
         maxRetries: 1,
-        maxOutputTokens: Math.min(3_200, Math.max(1_200, input.budget.modelOutputTokens)),
+        maxOutputTokens: input.budget.modelOutputTokens,
         timeout: {
-          totalMs: Math.min(45_000, input.budget.totalDeadlineMs),
-          firstChunkMs: 30_000,
-          chunkMs: 15_000,
+          totalMs: Math.min(input.budget.specialistTimeoutMs, input.budget.totalDeadlineMs),
+          firstChunkMs: Math.min(30_000, input.budget.specialistTimeoutMs),
+          chunkMs: Math.min(15_000, input.budget.specialistTimeoutMs),
         },
       });
       const decisions = result.output?.decisions ?? [];

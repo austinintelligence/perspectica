@@ -95,7 +95,7 @@ export function synthesizePerspective(
             ];
           }),
           weighting: {
-            articleWeight: 0.6,
+            articleWeight: 0.5,
             publicationHistory:
               contextAssertions.filter(
                 (assertion) => assertion.context?.sourceKind === "publication-history",
@@ -113,7 +113,7 @@ export function synthesizePerspective(
                 (assertion) => assertion.context?.sourceKind === "topic-context",
               ).length / Math.max(contextAssertions.length, 1),
             rationale:
-              "Article-owned signals remain the anchor; accepted contextual signals contribute no more than forty percent.",
+              "Article-owned signals remain the anchor; accepted contextual signals contribute no more than fifty percent.",
           },
         },
   );

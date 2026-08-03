@@ -434,9 +434,9 @@ export async function createAnalysisPlan(
       maxOutputTokens: budget.modelOutputTokens,
       maxRetries: 1,
       timeout: {
-        totalMs: Math.min(45_000, budget.totalDeadlineMs),
-        firstChunkMs: 30_000,
-        chunkMs: 15_000,
+        totalMs: Math.min(budget.specialistTimeoutMs, budget.totalDeadlineMs),
+        firstChunkMs: Math.min(30_000, budget.specialistTimeoutMs),
+        chunkMs: Math.min(15_000, budget.specialistTimeoutMs),
       },
     });
     for await (const _ of result.partialOutputStream) options.signal?.throwIfAborted();

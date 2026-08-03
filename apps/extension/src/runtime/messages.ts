@@ -10,6 +10,7 @@ const requiredText = z.string().trim().min(1);
 const requestId = requiredText.max(128);
 const jobId = requiredText.max(128);
 const runToken = requiredText.max(128);
+const cacheScope = requiredText.max(256).nullable().optional();
 const sequence = z.number().int().nonnegative();
 
 // Increment this whenever the side panel, service worker, and offscreen
@@ -18,7 +19,7 @@ const sequence = z.number().int().nonnegative();
 // MV3 service worker or offscreen document.
 export const PERSPECTICA_RUNTIME_PROTOCOL = 6;
 
-export const SearchProviderSchema = z.enum(["exa", "chatgpt"]);
+export const SearchProviderSchema = z.enum(["free", "chatgpt", "exa"]);
 export type SearchProviderKind = z.infer<typeof SearchProviderSchema>;
 
 export const ExtensionPreferencesSchema = AnalysisPreferencesSchema.extend({
@@ -32,7 +33,8 @@ export const DEFAULT_EXTENSION_PREFERENCES: ExtensionPreferences = {
   model: "gpt-5.6-luna",
   reasoningEffort: "medium",
   mode: "balanced",
-  searchProvider: "exa",
+  depth: "balanced",
+  searchProvider: "free",
   rememberChatGpt: true,
 };
 
@@ -128,6 +130,7 @@ export const AnalysisResumeDataSchema = z.object({
   runToken,
   request: OffscreenAnalysisRequestSchema,
   searchProvider: SearchProviderSchema,
+  cacheScope,
 });
 export type AnalysisResumeData = z.infer<typeof AnalysisResumeDataSchema>;
 
@@ -200,6 +203,7 @@ export const InternalRequestSchema = z.discriminatedUnion("type", [
   baseRequest.extend({
     type: z.literal("internal.analysis.log"),
     jobId,
+    runToken,
     entry: AnalysisLogInputSchema,
   }),
   baseRequest.extend({
@@ -232,6 +236,7 @@ export const OffscreenCommandSchema = z.discriminatedUnion("type", [
     initialSequence: sequence.default(0),
     request: OffscreenAnalysisRequestSchema,
     searchProvider: SearchProviderSchema,
+    cacheScope,
   }),
   z.object({
     type: z.literal("offscreen.analysis.cancel"),
@@ -247,6 +252,7 @@ export const OffscreenCommandSchema = z.discriminatedUnion("type", [
     initialSequence: sequence.default(0),
     request: OffscreenAnalysisRequestSchema,
     searchProvider: SearchProviderSchema,
+    cacheScope,
     sections: z.array(ReportSectionSchema).min(1).max(6),
   }),
   z.object({
@@ -254,6 +260,7 @@ export const OffscreenCommandSchema = z.discriminatedUnion("type", [
     protocol: z.literal(PERSPECTICA_RUNTIME_PROTOCOL),
     provider: SearchProviderSchema,
     preferences: AnalysisPreferencesSchema.extend({ mode: AnalysisModeSchema }),
+    cacheScope,
   }),
 ]);
 export type OffscreenCommand = z.infer<typeof OffscreenCommandSchema>;

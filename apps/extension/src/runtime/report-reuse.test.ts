@@ -13,6 +13,8 @@ const article = {
 const preferences = {
   model: "gpt-5.6-luna" as const,
   reasoningEffort: "medium" as const,
+  mode: "balanced" as const,
+  depth: "balanced" as const,
   searchProvider: "exa" as const,
 };
 const configFingerprint = createAnalysisConfigFingerprint(preferences);
@@ -37,6 +39,12 @@ function job(overrides: Partial<AnalysisJob> = {}): AnalysisJob {
 }
 
 describe("canReuseAnalysisJob", () => {
+  it("includes V2 pipeline versions and depth in the reuse fingerprint", () => {
+    expect(configFingerprint).toContain("analysis-config-v2");
+    expect(configFingerprint).toContain("intelligence-graph-v2");
+    expect(configFingerprint).toContain(":balanced:balanced:exa");
+  });
+
   it("reuses a report when tab, canonical URL, and fingerprint match", () => {
     expect(canReuseAnalysisJob(job(), article, 7, configFingerprint)).toBe(true);
   });
@@ -70,6 +78,8 @@ describe("canReuseAnalysisJob", () => {
     const changed = [
       createAnalysisConfigFingerprint({ ...preferences, model: "gpt-5.6-sol" }),
       createAnalysisConfigFingerprint({ ...preferences, reasoningEffort: "high" }),
+      createAnalysisConfigFingerprint({ ...preferences, mode: "deep" }),
+      createAnalysisConfigFingerprint({ ...preferences, depth: "verified" }),
       createAnalysisConfigFingerprint({ ...preferences, searchProvider: "chatgpt" }),
     ];
 

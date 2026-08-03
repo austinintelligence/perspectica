@@ -23,7 +23,7 @@ export function evaluateSufficiency(
   const coverage = plan.claims.length === 0 ? 1 : covered.size / plan.claims.length;
   const stop =
     assertions.length >= budget.maxSources ||
-    (coverage >= (budget.mode === "fast" ? 0.6 : budget.mode === "balanced" ? 0.75 : 0.9) &&
+    (coverage >= (budget.mode === "quick" ? 0.6 : budget.mode === "balanced" ? 0.75 : 0.9) &&
       completedMissions >= Math.min(2, plan.missions.length)) ||
     completedMissions >= plan.missions.length;
   return {
