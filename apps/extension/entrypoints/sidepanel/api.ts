@@ -135,10 +135,15 @@ export async function streamAnalysis(
   if (signal?.aborted) throw abortError();
   const runtime = await getRuntimeState();
   if (preferences) {
+    const preferencesWithLegacyMode = preferences as AnalysisPreferences & {
+      mode?: ExtensionPreferences["mode"];
+    };
     await updateExtensionPreferences({
       ...runtime.preferences,
       model: preferences.model,
       reasoningEffort: preferences.reasoningEffort,
+      ...(preferencesWithLegacyMode.mode ? { mode: preferencesWithLegacyMode.mode } : {}),
+      ...(preferences.depth ? { depth: preferences.depth } : {}),
     });
   }
   if (options?.retrySections?.length && !runtime.activeJob) {

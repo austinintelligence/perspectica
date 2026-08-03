@@ -16,6 +16,7 @@ import type {
   ReaderCopy,
   ReaderCitation,
   SourceListResult,
+  ResearchDepth,
 } from "@perspectica/contracts";
 import type { ReportSection } from "@perspectica/contracts/report";
 import { AnalysisProgress } from "./AnalysisProgress";
@@ -29,7 +30,26 @@ import { Section } from "./Section";
 import { SettingsScreen } from "./SettingsScreen";
 import type { SettingsPreferences } from "./SettingsScreen";
 import { SearchSetupScreen } from "./SearchSetupScreen";
+import { ResearchDepthControl } from "./DepthControl";
 import { DEFAULT_ANALYSIS_PREFERENCES } from "./preferences";
+import {
+  acceptedReaderCopy,
+  buildFootnoteLedger,
+  FootnoteMarker,
+  InlineFootnotes,
+  SectionFootnotes,
+  canonicalCitationKey,
+  type CitationTarget,
+} from "./footnotes";
+export {
+  acceptedReaderCopy,
+  buildFootnoteLedger,
+  canonicalCitationKey,
+  FootnoteMarker,
+  InlineFootnotes,
+  SectionFootnotes,
+} from "./footnotes";
+export type { CitationTarget, FootnoteEntry } from "./footnotes";
 import {
   beginExtraction,
   beginTargetedRetry,
@@ -37,6 +57,7 @@ import {
   failReport,
   isAnalysisActive,
 } from "./report-state";
+import type { ReportPhase } from "./report-state";
 import { ReportStore } from "./report-store";
 import type { ReportSectionKey } from "./report-store";
 import {
@@ -44,6 +65,7 @@ import {
   clearAnalysisLogs,
   getAnalysisLogs,
   getRuntimeState,
+  isResumableJob,
   streamAnalysis,
   type AnalysisStreamStatus,
   testSearchProvider,
@@ -103,7 +125,13 @@ function formatDate(value: string | null): string | null {
   });
 }
 
-export function SourceLink({ source }: { source: ExternalSource }) {
+export function SourceLink({
+  source,
+  footnote,
+}: {
+  source: ExternalSource;
+  footnote?: { scope: string; number: number; citation: CitationTarget };
+}) {
   const isSearchSummary = source.citationKind === "search-summary";
   return (
     <article className="source-result">
@@ -115,6 +143,13 @@ export function SourceLink({ source }: { source: ExternalSource }) {
         <a href={source.url} target="_blank" rel="noreferrer">
           {source.title}
         </a>
+        {footnote ? (
+          <FootnoteMarker
+            scope={footnote.scope}
+            number={footnote.number}
+            citation={footnote.citation}
+          />
+        ) : null}
         <small>
           {source.publication ? ` · ${source.publication}` : ""}
           {source.publishedAt ? ` · ${new Date(source.publishedAt).toLocaleDateString()}` : ""}
@@ -132,57 +167,29 @@ export function SourceLink({ source }: { source: ExternalSource }) {
   );
 }
 
-interface CitationTarget {
-  id: string;
-  title: string;
-  publication: string;
-  url: string;
-  citationKind?: "source-excerpt" | "search-summary";
-}
-
-function InlineCitations({
-  citationIds,
-  citations,
-}: {
-  citationIds: string[];
-  citations: ReadonlyMap<string, CitationTarget>;
-}) {
-  const accepted = citationIds.flatMap((id) => {
-    const citation = citations.get(id);
-    return citation ? [citation] : [];
-  });
-  if (accepted.length === 0) return null;
-  return (
-    <span className="inline-citations" aria-label="Sources">
-      {accepted.map((citation) => (
-        <span className="inline-citation" key={citation.id}>
-          <a href={citation.url} target="_blank" rel="noreferrer">
-            {citation.publication || citation.title}
-          </a>
-          {citation.citationKind === "search-summary" ? (
-            <small className="search-summary-label">Web-search summary</small>
-          ) : null}
-        </span>
-      ))}
-    </span>
-  );
-}
-
 function ReaderCopyBody({
   copy,
   citations,
   labels,
+  sectionId = "report",
 }: {
   copy: ReaderCopy;
   citations: ReadonlyMap<string, CitationTarget>;
   labels?: ReadonlyMap<string, string>;
+  sectionId?: string;
 }) {
+  const accepted = acceptedReaderCopy(copy, citations);
+  if (!accepted) return null;
+  const ledger = buildFootnoteLedger(
+    accepted.findings.flatMap((finding) => finding.citationIds),
+    citations,
+  );
   return (
     <div className="reader-copy">
       <p>
-        <ProgressiveText text={copy.lead} />
+        <ProgressiveText text={accepted.lead} />
       </p>
-      {copy.findings.map((finding) => {
+      {accepted.findings.map((finding) => {
         const findingLabels = [
           ...new Set(
             finding.citationIds.flatMap((id) => (labels?.has(id) ? [labels.get(id)!] : [])),
@@ -195,7 +202,12 @@ function ReaderCopyBody({
             ) : null}
             <p>
               <ProgressiveText text={finding.text} />
-              <InlineCitations citationIds={finding.citationIds} citations={citations} />
+              <InlineFootnotes
+                citationIds={finding.citationIds}
+                citations={citations}
+                scope={sectionId}
+                numbers={ledger.numbers}
+              />
             </p>
             {finding.keySourceNote ? (
               <small className="key-source-note">
@@ -205,6 +217,7 @@ function ReaderCopyBody({
           </article>
         );
       })}
+      <SectionFootnotes scope={sectionId} entries={ledger.entries} />
     </div>
   );
 }
@@ -218,52 +231,71 @@ function evidenceCitationMap(sources: ExternalSource[]): Map<string, CitationTar
         title: source.title,
         publication: source.publication,
         url: source.url,
+        publishedAt: source.publishedAt,
         citationKind: source.citationKind,
       },
     ]),
   );
 }
 
-function EvidenceBody({ result }: { result: EvidenceSectionData }) {
-  if (result.readerCopy) {
-    return (
-      <ReaderCopyBody copy={result.readerCopy} citations={evidenceCitationMap(result.sources)} />
-    );
+function EvidenceBody({ result, sectionId }: { result: EvidenceSectionData; sectionId: string }) {
+  const citations = evidenceCitationMap(result.sources);
+  if (result.readerCopy && acceptedReaderCopy(result.readerCopy, citations)) {
+    return <ReaderCopyBody copy={result.readerCopy} citations={citations} sectionId={sectionId} />;
   }
+  const ledger = buildFootnoteLedger(
+    result.sources.map((source) => source.id),
+    citations,
+  );
   return (
     <>
       <p>
         <ProgressiveText text={result.summary} />
       </p>
-      {result.sources.map((source) => (
-        <SourceLink key={source.id} source={source} />
-      ))}
+      {result.sources.map((source) => {
+        const number = ledger.numbers.get(source.id);
+        return (
+          <SourceLink
+            key={source.id}
+            source={source}
+            footnote={
+              number ? { scope: sectionId, number, citation: citations.get(source.id)! } : undefined
+            }
+          />
+        );
+      })}
+      <SectionFootnotes scope={sectionId} entries={ledger.entries} />
     </>
   );
 }
 
 function JournalistBody({ result }: { result: JournalistContextResult }) {
-  if (result.readerCopy) {
+  const citations = new Map(
+    result.findings.map((finding) => [
+      finding.id,
+      {
+        id: finding.id,
+        title: finding.sourceTitle,
+        publication: finding.publication,
+        url: finding.url,
+        publishedAt: null,
+        citationKind: finding.citationKind,
+      },
+    ]),
+  );
+  if (result.readerCopy && acceptedReaderCopy(result.readerCopy, citations)) {
     return (
       <ReaderCopyBody
         copy={result.readerCopy}
-        citations={
-          new Map(
-            result.findings.map((finding) => [
-              finding.id,
-              {
-                id: finding.id,
-                title: finding.sourceTitle,
-                publication: finding.publication,
-                url: finding.url,
-                citationKind: finding.citationKind,
-              },
-            ]),
-          )
-        }
+        sectionId="journalist-context"
+        citations={citations}
       />
     );
   }
+  const ledger = buildFootnoteLedger(
+    result.findings.map((finding) => finding.id),
+    citations,
+  );
   return (
     <>
       <p>
@@ -279,6 +311,13 @@ function JournalistBody({ result }: { result: JournalistContextResult }) {
             <a href={finding.url} target="_blank" rel="noreferrer">
               {finding.sourceTitle}
             </a>
+            {ledger.numbers.has(finding.id) ? (
+              <FootnoteMarker
+                scope="journalist-context"
+                number={ledger.numbers.get(finding.id)!}
+                citation={citations.get(finding.id)!}
+              />
+            ) : null}
             <small>{finding.publication ? ` · ${finding.publication}` : ""}</small>
             {finding.citationKind === "search-summary" ? (
               <small className="search-summary-label">Web-search summary</small>
@@ -291,35 +330,64 @@ function JournalistBody({ result }: { result: JournalistContextResult }) {
           ) : null}
         </article>
       ))}
+      <SectionFootnotes scope="journalist-context" entries={ledger.entries} />
     </>
   );
 }
 
 function AdditionalContextBody({ result }: { result: AdditionalContextResult }) {
-  if (result.readerCopy) {
+  const citations = evidenceCitationMap(result.sources);
+  if (result.readerCopy && acceptedReaderCopy(result.readerCopy, citations)) {
     return (
-      <ReaderCopyBody copy={result.readerCopy} citations={evidenceCitationMap(result.sources)} />
+      <ReaderCopyBody
+        copy={result.readerCopy}
+        citations={citations}
+        sectionId="additional-context"
+      />
     );
   }
+  const ledger = buildFootnoteLedger(
+    result.sources.map((source) => source.id),
+    citations,
+  );
   return (
     <>
       <p>
         <ProgressiveText text={result.summary} />
       </p>
-      {result.sources.map((source) => (
-        <SourceLink key={source.id} source={source} />
-      ))}
+      {result.sources.map((source) => {
+        const number = ledger.numbers.get(source.id);
+        return (
+          <SourceLink
+            key={source.id}
+            source={source}
+            footnote={
+              number
+                ? { scope: "additional-context", number, citation: citations.get(source.id)! }
+                : undefined
+            }
+          />
+        );
+      })}
+      <SectionFootnotes scope="additional-context" entries={ledger.entries} />
     </>
   );
 }
 
 function SourceListBody({ result }: { result: SourceListResult }) {
-  if (result.sources.length === 0) {
+  const seen = new Set<string>();
+  const sources = result.sources.filter((source) => {
+    const key = canonicalCitationKey(source.url);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  if (sources.length === 0) {
     return <p>No cited works were found in the article.</p>;
   }
   return (
     <ol className="original-sources">
-      {result.sources.map((source) => (
+      {sources.map((source) => (
         <li key={source.id}>
           <h3>
             <a href={source.url} target="_blank" rel="noreferrer">
@@ -332,9 +400,185 @@ function SourceListBody({ result }: { result: SourceListResult }) {
   );
 }
 
+interface AnalyzeScreenProps {
+  metadata: ArticleMetadataForPreview | null;
+  onAnalyze: () => void;
+  onOpenSettings: () => void;
+  menuItems?: ReadonlyArray<{ label: string; onSelect: () => void }>;
+  researchDepth?: ResearchDepth;
+  onResearchDepthChange?: (depth: ResearchDepth) => void;
+}
+
+type ArticleMetadataForPreview = {
+  title: string;
+  author: string | null;
+  publication: string | null;
+  publishedAt: string | null;
+  contentType: string;
+};
+
+export function AnalyzeScreen({
+  metadata,
+  onAnalyze,
+  onOpenSettings,
+  menuItems,
+  researchDepth = "balanced" as ResearchDepth,
+  onResearchDepthChange,
+}: AnalyzeScreenProps) {
+  const publishedAt = formatDate(metadata?.publishedAt ?? null);
+  return (
+    <div className="app-shell atmosphere-page">
+      <BrandHeader
+        action="menu"
+        actionLabel="Open Perspectica menu"
+        onAction={onOpenSettings}
+        menuItems={menuItems}
+      />
+      <main className="analyze-screen" aria-labelledby="analyze-title">
+        <p className="eyebrow">Article preview</p>
+        <h1 id="analyze-title" data-route-heading tabIndex={-1}>
+          {metadata?.title ?? "Ready to read this article?"}
+        </h1>
+        {metadata ? (
+          <p className="article-byline preview-byline">
+            {metadata.publication ?? "Current article"}
+            {metadata.author ? ` · By ${compactByline(metadata.author, metadata.publication)}` : ""}
+            {publishedAt ? ` · ${publishedAt}` : ""}
+          </p>
+        ) : (
+          <p className="analyze-lede">
+            Perspectica previews the active article locally, then researches it only when you choose
+            Analyze.
+          </p>
+        )}
+        <div className="analyze-boundary" role="note">
+          <strong>Research begins only when you select Analyze.</strong>
+          <span>Your article stays local until then.</span>
+        </div>
+        <ResearchDepthControl
+          depth={researchDepth}
+          onChange={onResearchDepthChange}
+          id="analyze-research-depth"
+          compact
+        />
+        <button type="button" className="chatgpt-action analyze-action" onClick={onAnalyze}>
+          Analyze article
+        </button>
+      </main>
+    </div>
+  );
+}
+
+export function DiagnosticsScreen({ onBack }: { onBack: () => void }) {
+  const [status, setStatus] = useState<"idle" | "copying" | "copied" | "error">("idle");
+  const [clearStatus, setClearStatus] = useState<"idle" | "clearing" | "cleared" | "error">("idle");
+  const [manual, setManual] = useState<string | null>(null);
+  const textRef = useRef<HTMLTextAreaElement | null>(null);
+  const copy = async () => {
+    setStatus("copying");
+    try {
+      const logs = await getAnalysisLogs();
+      if (await copyText(logs.text)) {
+        setStatus("copied");
+      } else {
+        setManual(logs.text);
+        setStatus("error");
+        requestAnimationFrame(() => {
+          textRef.current?.focus();
+          textRef.current?.select();
+        });
+      }
+    } catch {
+      setStatus("error");
+    }
+  };
+  const clear = async () => {
+    if (!window.confirm("Clear saved Perspectica diagnostics from this device?")) return;
+    setClearStatus("clearing");
+    try {
+      await clearAnalysisLogs();
+      setManual(null);
+      setClearStatus("cleared");
+    } catch {
+      setClearStatus("error");
+    }
+  };
+  return (
+    <div className="connection-shell atmosphere-page diagnostics-screen">
+      <BrandHeader action="close" actionLabel="Back to settings" onAction={onBack} />
+      <main className="settings-main" aria-labelledby="diagnostics-title">
+        <p className="eyebrow">Support</p>
+        <h1 id="diagnostics-title" data-route-heading tabIndex={-1}>
+          Diagnostics
+        </h1>
+        <p className="connection-lede">
+          Copy a sanitized activity log when you need help. Article text and credentials are not
+          included.
+        </p>
+        <div className="diagnostics-actions">
+          <button type="button" className="chatgpt-action" onClick={() => void copy()}>
+            {status === "copying"
+              ? "Preparing logs…"
+              : status === "copied"
+                ? "Logs copied"
+                : "Copy logs"}
+          </button>
+          <button
+            type="button"
+            className="clear-logs-button"
+            onClick={() => void clear()}
+            disabled={clearStatus === "clearing"}
+          >
+            {clearStatus === "clearing"
+              ? "Clearing…"
+              : clearStatus === "cleared"
+                ? "Diagnostics cleared"
+                : clearStatus === "error"
+                  ? "Could not clear"
+                  : "Clear diagnostics"}
+          </button>
+          <p className="settings-saved" role={status === "error" ? "alert" : "status"}>
+            {status === "error" ? "Automatic copy was blocked; use the selected log below." : ""}
+          </p>
+          {manual ? (
+            <textarea
+              ref={textRef}
+              className="manual-log-textarea"
+              readOnly
+              value={manual}
+              aria-label="Perspectica sanitized diagnostics log"
+              onFocus={(event) => event.currentTarget.select()}
+            />
+          ) : null}
+        </div>
+      </main>
+    </div>
+  );
+}
+
+export function AboutScreen({ onBack }: { onBack: () => void }) {
+  return (
+    <div className="connection-shell atmosphere-page">
+      <BrandHeader action="close" actionLabel="Back to settings" onAction={onBack} />
+      <main className="runtime-state-screen" aria-labelledby="about-title">
+        <p className="eyebrow">Perspectica</p>
+        <h1 id="about-title" data-route-heading tabIndex={-1}>
+          Read with context.
+        </h1>
+        <p>An editorial lens for understanding how reporting is framed, supported, and situated.</p>
+        <p className="settings-saved">Research stays bounded to the article you choose.</p>
+      </main>
+    </div>
+  );
+}
+
 interface AnalysisReportProps {
   preferences: AnalysisPreferences;
   onOpenSettings: () => void;
+  menuItems?: ReadonlyArray<{ label: string; onSelect: () => void }>;
+  autoStart?: boolean;
+  screen?: "controller" | "running" | "report";
+  onPhaseChange?: (phase: ReportPhase) => void;
 }
 
 export function PartialReportNotice({ onRetry }: { onRetry: () => void }) {
@@ -391,18 +635,18 @@ const ConnectedCompass = memo(function ConnectedCompass({ store }: { store: Repo
 const ConnectedBias = memo(function ConnectedBias({ store }: { store: ReportStore }) {
   const section = useReportSection(store, "bias");
   const data = section.data;
+  const citations = new Map(
+    (data?.citations ?? []).map((citation: ReaderCitation) => [citation.id, citation]),
+  );
   return (
     <Section id="bias" title="Bias" status={section.status} error={section.error}>
       {data ? (
-        data.readerCopy ? (
+        data.readerCopy && acceptedReaderCopy(data.readerCopy, citations) ? (
           <ReaderCopyBody
             copy={data.readerCopy}
+            sectionId="bias"
             labels={new Map(data.findings.map((finding) => [finding.id, finding.displayName]))}
-            citations={
-              new Map(
-                (data.citations ?? []).map((citation: ReaderCitation) => [citation.id, citation]),
-              )
-            }
+            citations={citations}
           />
         ) : (
           <>
@@ -459,7 +703,7 @@ const ConnectedEvidence = memo(function ConnectedEvidence({
   const section = useReportSection(store, sectionKey);
   return (
     <Section id={id} title={title} status={section.status} error={section.error}>
-      {section.data ? <EvidenceBody result={section.data} /> : null}
+      {section.data ? <EvidenceBody result={section.data} sectionId={id} /> : null}
     </Section>
   );
 });
@@ -491,7 +735,14 @@ const ConnectedSourceList = memo(function ConnectedSourceList({ store }: { store
   );
 });
 
-function AnalysisReport({ preferences, onOpenSettings }: AnalysisReportProps) {
+function AnalysisReport({
+  preferences,
+  onOpenSettings,
+  menuItems,
+  autoStart = false,
+  screen = "report",
+  onPhaseChange,
+}: AnalysisReportProps) {
   const reportStoreRef = useRef<ReportStore | null>(null);
   reportStoreRef.current ??= new ReportStore();
   const reportStore = reportStoreRef.current;
@@ -501,15 +752,6 @@ function AnalysisReport({ preferences, onOpenSettings }: AnalysisReportProps) {
     reportStore.getSnapshot,
   );
   const [streamStatus, setStreamStatus] = useState<AnalysisStreamStatus>("connected");
-  const [logCopyStatus, setLogCopyStatus] = useState<"idle" | "copying" | "copied" | "error">(
-    "idle",
-  );
-  const [logClearStatus, setLogClearStatus] = useState<"idle" | "clearing" | "cleared" | "error">(
-    "idle",
-  );
-  const [logExportText, setLogExportText] = useState<string | null>(null);
-  const [logExportError, setLogExportError] = useState<string | null>(null);
-  const logExportRef = useRef<HTMLTextAreaElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const runRef = useRef(0);
   const effectStartedRef = useRef(false);
@@ -519,6 +761,10 @@ function AnalysisReport({ preferences, onOpenSettings }: AnalysisReportProps) {
   useEffect(() => {
     preferencesRef.current = preferences;
   }, [preferences]);
+
+  useEffect(() => {
+    onPhaseChange?.(state.phase);
+  }, [onPhaseChange, state.phase]);
 
   const analyze = useCallback(
     async (forceNew = false, retrySections?: readonly ReportSection[]) => {
@@ -579,7 +825,7 @@ function AnalysisReport({ preferences, onOpenSettings }: AnalysisReportProps) {
       clearTimeout(cleanupTimerRef.current);
       cleanupTimerRef.current = null;
     }
-    if (!effectStartedRef.current) {
+    if (autoStart && !effectStartedRef.current) {
       effectStartedRef.current = true;
       void analyze();
     }
@@ -591,57 +837,77 @@ function AnalysisReport({ preferences, onOpenSettings }: AnalysisReportProps) {
         cleanupTimerRef.current = null;
       }, 0);
     };
-  }, [analyze]);
+  }, [analyze, autoStart]);
 
   const metadata = state.metadata;
   const publishedAt = formatDate(metadata?.publishedAt ?? null);
-  const copyLogs = useCallback(async () => {
-    setLogCopyStatus("copying");
-    setLogExportError(null);
-    try {
-      const exported = await getAnalysisLogs();
-      if (await copyText(exported.text)) {
-        setLogExportText(null);
-        setLogCopyStatus("copied");
-        return;
-      }
-      setLogExportText(exported.text);
-      setLogCopyStatus("error");
-      requestAnimationFrame(() => {
-        logExportRef.current?.focus();
-        logExportRef.current?.select();
-      });
-    } catch (error) {
-      setLogExportError(
-        error instanceof Error ? error.message : "Perspectica could not prepare the logs.",
-      );
-      setLogCopyStatus("error");
-    }
-  }, []);
 
-  const clearLogs = useCallback(async () => {
-    if (state.phase === "idle" || !window.confirm("Clear saved telemetry for this analysis?")) {
-      return;
-    }
-    setLogClearStatus("clearing");
-    try {
-      await clearAnalysisLogs();
-      setLogClearStatus("cleared");
-    } catch {
-      setLogClearStatus("error");
-    }
-  }, [state.phase]);
+  if (screen === "controller") return null;
+
+  if (screen === "running") {
+    return (
+      <div className="app-shell atmosphere-page running-shell">
+        <BrandHeader
+          action="menu"
+          actionLabel="Open Perspectica menu"
+          onAction={onOpenSettings}
+          menuItems={menuItems}
+        />
+        <main className="running-main" aria-labelledby="running-title">
+          <p className="eyebrow">Research in progress</p>
+          <h1 id="running-title" data-route-heading tabIndex={-1}>
+            Building your report
+          </h1>
+          {metadata?.title ? <p className="running-article-title">{metadata.title}</p> : null}
+          <p className="running-lede">
+            Perspectica is checking the article, its framing, and independent context.
+          </p>
+          <AnalysisProgress state={state} onCancel={cancelAnalysis} />
+          {streamStatus === "reconnecting" ? (
+            <p className="stream-reconnect" role="status">
+              Reconnecting to the analysis…
+            </p>
+          ) : null}
+          {state.error ? (
+            <div className="page-error" role="alert">
+              <strong>Research needs attention.</strong>
+              <p>{state.error}</p>
+              <button type="button" onClick={() => void analyze(true)}>
+                Retry research
+              </button>
+            </div>
+          ) : null}
+          {state.phase === "cancelled" ? (
+            <div className="page-notice" role="status">
+              <strong>Research stopped.</strong>
+              <p>Your article preview is still available. Start a fresh report when ready.</p>
+              <button type="button" onClick={() => void analyze(true)}>
+                Retry research
+              </button>
+            </div>
+          ) : null}
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="app-shell atmosphere-page">
-      <BrandHeader action="menu" actionLabel="Open preferences" onAction={onOpenSettings} />
+      <BrandHeader
+        action="menu"
+        actionLabel="Open preferences"
+        onAction={onOpenSettings}
+        menuItems={menuItems}
+      />
       <header className="article-header">
         {metadata ? (
           <div className="article-intro">
             <p className="article-eyebrow">
               {metadata.publication ?? "Current article"} · {metadata.contentType}
             </p>
-            <h1>{metadata.title}</h1>
+            <h1 data-route-heading tabIndex={-1}>
+              {metadata.title}
+            </h1>
             {metadata.author || publishedAt ? (
               <p className="article-byline" title={metadata.author ?? undefined}>
                 {metadata.author
@@ -655,7 +921,9 @@ function AnalysisReport({ preferences, onOpenSettings }: AnalysisReportProps) {
         ) : (
           <div className="article-intro intro-loading">
             <p className="article-eyebrow">Current article</p>
-            <h1>Reading the page…</h1>
+            <h1 data-route-heading tabIndex={-1}>
+              Reading the page…
+            </h1>
           </div>
         )}
       </header>
@@ -712,62 +980,6 @@ function AnalysisReport({ preferences, onOpenSettings }: AnalysisReportProps) {
                 {state.compass.status === "error" ? "Unavailable" : "Finding placement…"}
                       <ProgressiveText text={`“${finding.excerpt}”`} />
         */}
-
-        <footer className="telemetry-footer">
-          <button
-            type="button"
-            className="copy-logs-button"
-            onClick={() => void copyLogs()}
-            disabled={logCopyStatus === "copying" || state.phase === "idle"}
-          >
-            {logCopyStatus === "copying"
-              ? "Preparing logs…"
-              : logCopyStatus === "copied"
-                ? "Logs copied"
-                : logCopyStatus === "error"
-                  ? logExportText
-                    ? "Logs ready below"
-                    : "Try copying logs again"
-                  : "Copy logs"}
-          </button>
-          <button
-            type="button"
-            className="clear-logs-button"
-            onClick={() => void clearLogs()}
-            disabled={logClearStatus === "clearing" || state.phase === "idle"}
-          >
-            {logClearStatus === "clearing"
-              ? "Clearing…"
-              : logClearStatus === "cleared"
-                ? "Telemetry cleared"
-                : logClearStatus === "error"
-                  ? "Could not clear"
-                  : "Clear logs"}
-          </button>
-          {logExportText ? (
-            <div className="manual-log-export">
-              <p>
-                Automatic copy was blocked. The full sanitized log is selected below—press Command+C
-                to copy it.
-              </p>
-              <textarea
-                ref={logExportRef}
-                readOnly
-                value={logExportText}
-                aria-label="Perspectica analysis telemetry"
-                onFocus={(event) => event.currentTarget.select()}
-              />
-            </div>
-          ) : null}
-          {logExportError ? (
-            <p className="telemetry-error" role="alert">
-              {logExportError}
-            </p>
-          ) : null}
-          <span className="sr-only">
-            {logCopyStatus === "copied" ? "Full sanitized telemetry copied." : ""}
-          </span>
-        </footer>
       </main>
     </div>
   );
@@ -775,12 +987,45 @@ function AnalysisReport({ preferences, onOpenSettings }: AnalysisReportProps) {
 
 function ChatGptApp() {
   const connection = usePerspecticaChatGpt();
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  type Screen = "analyze" | "running" | "report" | "settings" | "diagnostics" | "about";
+  const [screen, setScreen] = useState<Screen>("analyze");
+  const returnScreenRef = useRef<Screen>("analyze");
+  const [researchDepth, setResearchDepth] = useState<ResearchDepth>("balanced" as ResearchDepth);
   const [runtime, setRuntime] = useState<RuntimeState | null>(null);
   const [runtimeError, setRuntimeError] = useState<string | null>(null);
   const [runtimeAttempt, setRuntimeAttempt] = useState(0);
   const [providerReady, setProviderReady] = useState(false);
   const [articleAccess, setArticleAccess] = useState<"loading" | "granted" | "missing">("loading");
+  const previousScreenRef = useRef<Screen>("analyze");
+  const reportScrollTopRef = useRef(0);
+
+  const openSettings = useCallback(() => {
+    returnScreenRef.current = screen;
+    setScreen("settings");
+  }, [screen]);
+  const closeSettings = useCallback(() => setScreen(returnScreenRef.current), []);
+
+  useEffect(() => {
+    const previous = previousScreenRef.current;
+    const modalRoute = screen === "settings" || screen === "diagnostics" || screen === "about";
+    const wasModalRoute =
+      previous === "settings" || previous === "diagnostics" || previous === "about";
+    if (modalRoute && !wasModalRoute) {
+      reportScrollTopRef.current = window.scrollY;
+      window.scrollTo({ top: 0, behavior: "auto" });
+    } else if (!modalRoute && wasModalRoute) {
+      requestAnimationFrame(() =>
+        window.scrollTo({ top: reportScrollTopRef.current, behavior: "auto" }),
+      );
+    } else if (screen !== previous) {
+      window.scrollTo({ top: 0, behavior: "auto" });
+    }
+    previousScreenRef.current = screen;
+    requestAnimationFrame(() => {
+      const heading = document.querySelector<HTMLElement>("[data-route-heading]");
+      heading?.focus();
+    });
+  }, [screen]);
 
   useEffect(() => {
     let active = true;
@@ -796,7 +1041,16 @@ function ChatGptApp() {
           return;
         }
         setRuntime(state);
-        setProviderReady(state.preferences.searchProvider === "chatgpt" || state.hasExaKey);
+        setResearchDepth((state.preferences.depth ?? "balanced") as ResearchDepth);
+        setProviderReady(state.preferences.searchProvider !== "exa" || state.hasExaKey);
+        const activeJob = state.activeJob;
+        if (activeJob && isResumableJob(activeJob)) {
+          setScreen(
+            activeJob.status === "complete" || activeJob.status === "partial"
+              ? "report"
+              : "running",
+          );
+        }
       })
       .catch((cause: unknown) => {
         if (!active) return;
@@ -862,20 +1116,46 @@ function ChatGptApp() {
       setRuntime((current) => (current ? { ...current, preferences: saved } : current));
     } catch (error) {
       setRuntime(previous);
-      setProviderReady(previous.preferences.searchProvider === "chatgpt" || previous.hasExaKey);
+      setProviderReady(previous.preferences.searchProvider !== "exa" || previous.hasExaKey);
       throw error;
     }
   };
+
+  const updateResearchDepth = async (depth: ResearchDepth) => {
+    const previousDepth = researchDepth;
+    setResearchDepth(depth);
+    if (!runtime) return;
+    try {
+      await updatePreferences({ ...runtime.preferences, depth, mode: depth });
+    } catch (error) {
+      setResearchDepth(previousDepth);
+      throw error;
+    }
+  };
+
+  const menuItems = [
+    { label: "Settings", onSelect: openSettings },
+    {
+      label: "Diagnostics",
+      onSelect: () => {
+        returnScreenRef.current = screen;
+        setScreen("diagnostics");
+      },
+    },
+    {
+      label: "About",
+      onSelect: () => {
+        returnScreenRef.current = screen;
+        setScreen("about");
+      },
+    },
+  ] as const;
 
   let page: ReactNode;
   if (runtimeError) {
     page = (
       <div className="connection-shell atmosphere-page">
-        <BrandHeader
-          action="menu"
-          actionLabel="Open preferences"
-          onAction={() => setSettingsOpen(true)}
-        />
+        <BrandHeader action="menu" actionLabel="Open preferences" onAction={openSettings} />
         <main className="runtime-state-screen" role="alert">
           <p className="eyebrow">Extension runtime</p>
           <h1>Perspectica needs a moment.</h1>
@@ -896,11 +1176,7 @@ function ChatGptApp() {
   } else if (connection.isAuthenticated && (!runtime || articleAccess === "loading")) {
     page = (
       <div className="connection-shell atmosphere-page">
-        <BrandHeader
-          action="menu"
-          actionLabel="Open preferences"
-          onAction={() => setSettingsOpen(true)}
-        />
+        <BrandHeader action="menu" actionLabel="Open preferences" onAction={openSettings} />
         <main className="runtime-state-screen" aria-live="polite">
           <p className="eyebrow">Preparing Perspectica</p>
           <h1>Restoring your local session…</h1>
@@ -916,16 +1192,54 @@ function ChatGptApp() {
     page = (
       <ArticleAccessScreen
         onReady={() => setArticleAccess("granted")}
-        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSettings={openSettings}
       />
     );
   } else if (connection.isAuthenticated && runtime && providerReady) {
-    page = (
-      <AnalysisReport
-        preferences={runtime.preferences}
-        onOpenSettings={() => setSettingsOpen(true)}
-      />
-    );
+    if (screen === "settings") {
+      page = (
+        <SettingsScreen
+          authenticated={connection.isAuthenticated}
+          preferences={runtime.preferences}
+          onChange={updatePreferences}
+          onClose={closeSettings}
+          onDisconnect={connection.logout}
+          availableModels={connection.models}
+          searchProvider={runtime.preferences.searchProvider}
+          hasExaKey={runtime.hasExaKey}
+          onSearchProviderChange={updateSearchProvider}
+          researchDepth={researchDepth}
+          onResearchDepthChange={updateResearchDepth}
+          onOpenDiagnostics={() => setScreen("diagnostics")}
+          onOpenAbout={() => setScreen("about")}
+          onExaKeySaved={() => {
+            setRuntime((current) => (current ? { ...current, hasExaKey: true } : current));
+            setProviderReady(true);
+          }}
+          onExaKeyRemoved={() => {
+            setRuntime((current) => (current ? { ...current, hasExaKey: false } : current));
+            if (runtime.preferences.searchProvider === "exa") setProviderReady(false);
+          }}
+        />
+      );
+    } else if (screen === "diagnostics") {
+      page = <DiagnosticsScreen onBack={() => setScreen("settings")} />;
+    } else if (screen === "about") {
+      page = <AboutScreen onBack={() => setScreen("settings")} />;
+    } else if (screen === "analyze") {
+      page = (
+        <AnalyzeScreen
+          metadata={null}
+          onAnalyze={() => setScreen("running")}
+          onOpenSettings={openSettings}
+          menuItems={menuItems}
+          researchDepth={researchDepth}
+          onResearchDepthChange={updateResearchDepth}
+        />
+      );
+    } else {
+      page = null;
+    }
   } else if (connection.isAuthenticated && runtime) {
     page = (
       <SearchSetupScreen
@@ -938,47 +1252,50 @@ function ChatGptApp() {
             hasExaKey: preferences.searchProvider === "exa" || runtime.hasExaKey,
           });
         }}
-        onReady={() => setProviderReady(true)}
-        onOpenSettings={() => setSettingsOpen(true)}
+        onReady={() => {
+          setProviderReady(true);
+          setScreen("analyze");
+        }}
+        onOpenSettings={openSettings}
       />
     );
-  } else {
+  } else if (screen === "settings") {
     page = (
-      <ChatGptConnectionScreen
-        connection={connection}
-        onOpenSettings={() => setSettingsOpen(true)}
+      <SettingsScreen
+        authenticated={false}
+        preferences={{ ...DEFAULT_ANALYSIS_PREFERENCES, mode: "balanced" }}
+        onChange={async () => undefined}
+        onClose={closeSettings}
+        onDisconnect={connection.logout}
+        researchDepth={researchDepth}
+        onResearchDepthChange={async () => undefined}
       />
     );
+  } else if (screen === "diagnostics") {
+    page = <DiagnosticsScreen onBack={() => setScreen("settings")} />;
+  } else if (screen === "about") {
+    page = <AboutScreen onBack={() => setScreen("settings")} />;
+  } else {
+    page = <ChatGptConnectionScreen connection={connection} onOpenSettings={openSettings} />;
   }
 
   return (
     <>
-      <div className="page-transition">{page}</div>
-      {settingsOpen ? (
-        <SettingsScreen
-          authenticated={connection.isAuthenticated}
-          preferences={
-            runtime?.preferences ?? { ...DEFAULT_ANALYSIS_PREFERENCES, mode: "balanced" }
-          }
-          onChange={updatePreferences}
-          onClose={() => setSettingsOpen(false)}
-          onDisconnect={connection.logout}
-          availableModels={connection.models}
-          searchProvider={runtime?.preferences.searchProvider}
-          hasExaKey={runtime?.hasExaKey}
-          onSearchProviderChange={updateSearchProvider}
-          onExaKeySaved={() => {
-            if (!runtime) return;
-            setRuntime({ ...runtime, hasExaKey: true });
-            setProviderReady(true);
-          }}
-          onExaKeyRemoved={() => {
-            if (!runtime) return;
-            setRuntime({ ...runtime, hasExaKey: false });
-            if (runtime.preferences.searchProvider === "exa") setProviderReady(false);
+      {runtime && providerReady && connection.isAuthenticated ? (
+        <AnalysisReport
+          preferences={runtime.preferences}
+          onOpenSettings={openSettings}
+          menuItems={menuItems}
+          autoStart={screen === "running" || screen === "report"}
+          screen={screen === "running" || screen === "report" ? screen : "controller"}
+          onPhaseChange={(phase) => {
+            if ((phase === "complete" || phase === "partial") && screen === "running") {
+              setScreen("report");
+            }
           }}
         />
       ) : null}
+      <div className="page-transition">{page}</div>
     </>
   );
 }
