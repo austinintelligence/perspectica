@@ -10,6 +10,10 @@ import {
 } from "../runtime/messages";
 import type { AnalysisEnvelope, PipelineEvent } from "@perspectica/contracts/events";
 import type { JsonStorageArea } from "./areas";
+import type {
+  EncryptedAnalysisHistoryEntry,
+  EncryptedAnalysisHistoryStore,
+} from "./analysis-history";
 import { AnalysisJournal } from "./job-journal";
 
 const ACTIVE_JOB_KEY = "perspectica.jobs.active.v1";
@@ -33,11 +37,38 @@ export class JobStore {
   constructor(
     private readonly storage: JsonStorageArea,
     private readonly journal = new AnalysisJournal(),
+    private readonly history?: Pick<EncryptedAnalysisHistoryStore, "get" | "retain" | "clear">,
+    private readonly onLegacyInvalidated?: () => Promise<void>,
   ) {}
 
   async get(id: string): Promise<AnalysisJob | undefined> {
-    const parsed = AnalysisJobSchema.safeParse(await this.storage.get(`${JOB_PREFIX}${id}`));
-    return parsed.success ? parsed.data : undefined;
+    const raw = await this.storage.get(`${JOB_PREFIX}${id}`);
+    const parsed = AnalysisJobSchema.safeParse(raw);
+    if (!parsed.success) return undefined;
+    const resume = await this.storage.get(`${RESUME_PREFIX}${id}`);
+    if (!isLegacyJobRecord(raw, resume)) return parsed.data;
+
+    // V1 event bodies are a different wire protocol. Never replay them as V2
+    // pipeline events; invalidate the interrupted report instead of showing a
+    // blank terminal report or dispatching an incompatible resume payload.
+    const invalidated = AnalysisJobSchema.parse({
+      ...parsed.data,
+      events: [],
+      status: "failed",
+      runToken: null,
+      revision: parsed.data.revision + 1,
+      lastEventSequence: 0,
+      updatedAt: new Date().toISOString(),
+      error: "This analysis was interrupted by an extension update. Start a new analysis.",
+    });
+    await Promise.all([
+      this.storage.set(`${JOB_PREFIX}${id}`, invalidated),
+      this.storage.remove(`${RESUME_PREFIX}${id}`),
+      this.journal.clearEvents(id),
+      this.journal.clearLogs(id),
+    ]);
+    await this.onLegacyInvalidated?.();
+    return invalidated;
   }
 
   private enqueueMutation<T>(operation: () => Promise<T>): Promise<T> {
@@ -143,6 +174,14 @@ export class JobStore {
     await this.storage.remove(`${LOG_PREFIX}${id}`);
   }
 
+  async getHistory(): Promise<EncryptedAnalysisHistoryEntry[]> {
+    return this.history ? this.history.get() : [];
+  }
+
+  async clearHistory(): Promise<void> {
+    await this.history?.clear();
+  }
+
   /**
    * Persist the journal row before advancing the job cursor. If storage fails
    * after the row is durable, a retry of the same request finds the row and
@@ -215,6 +254,15 @@ export class JobStore {
       error: null,
     });
     await this.setUnsafe(updated);
+    if (terminal && this.history) {
+      try {
+        const events = await this.journal.eventsSince(current.id, 0, 512);
+        await this.history.retain(updated, events);
+      } catch {
+        // Encrypted retention is a convenience archive. Journal durability
+        // and the active report must not depend on vault/quota availability.
+      }
+    }
     return updated;
   }
 
@@ -229,4 +277,24 @@ export class JobStore {
 
 function terminalStatus(status: AnalysisJob["status"]): boolean {
   return ["complete", "partial", "failed", "cancelled"].includes(status);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isLegacyJobRecord(value: unknown, resume: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if ("analysisId" in value) return true;
+  if (Array.isArray(value.events) && value.events.length > 0) return true;
+  if (value.status !== "queued" && value.status !== "extracting" && value.status !== "analyzing") {
+    return false;
+  }
+  if (typeof value.runToken !== "string") return true;
+  if (value.searchProvider === "free") return true;
+  if (isRecord(resume) && isRecord(resume.request)) {
+    const preferences = resume.request.preferences;
+    if (isRecord(preferences) && !("mode" in preferences)) return true;
+  }
+  return false;
 }

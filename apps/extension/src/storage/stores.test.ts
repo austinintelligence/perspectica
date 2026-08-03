@@ -59,7 +59,7 @@ describe("extension stores", () => {
       model: "gpt-5.6-luna",
       reasoningEffort: "medium",
       mode: "balanced",
-      searchProvider: "exa",
+      searchProvider: "free",
       rememberChatGpt: true,
     });
 
@@ -264,5 +264,73 @@ describe("extension stores", () => {
       }),
     ).resolves.toMatchObject({ accepted: false, gap: true });
     await expect(store.getEventsSince("job-1", 0)).resolves.toEqual([]);
+  });
+
+  it("invalidates a legacy terminal job instead of rendering a blank V2 report", async () => {
+    const storage = new MemoryStorage();
+    storage.values.set("perspectica.jobs.active.v1", "legacy-job");
+    storage.values.set("perspectica.jobs.v1.legacy-job", {
+      ...job("legacy-job"),
+      analysisId: "legacy-analysis",
+      status: "complete",
+      events: [{ type: "analysis.completed", data: {} }],
+      lastEventSequence: 4,
+    });
+    const store = new JobStore(storage);
+
+    await expect(store.getActive()).resolves.toMatchObject({
+      id: "legacy-job",
+      status: "failed",
+      runToken: null,
+      lastEventSequence: 0,
+      events: [],
+      error: expect.stringContaining("extension update"),
+    });
+    await expect(store.getResume("legacy-job")).resolves.toBeUndefined();
+  });
+
+  it("invalidates a legacy resumable job before dispatch can reuse its cursor", async () => {
+    const storage = new MemoryStorage();
+    storage.values.set("perspectica.jobs.v1.legacy-job", {
+      ...job("legacy-job"),
+      status: "analyzing",
+      runToken: "legacy-run",
+      events: [],
+    });
+    storage.values.set("perspectica.jobs.resume.v1.legacy-job", {
+      runToken: "legacy-run",
+      request: {
+        article: {
+          title: "Legacy",
+          author: null,
+          publication: null,
+          publishedAt: null,
+          canonicalUrl: "https://example.com/article",
+          contentType: "news",
+          paragraphs: [
+            { id: "p-1", kind: "paragraph", text: "Legacy article text", index: 0, speaker: null },
+          ],
+          links: [],
+          fingerprint: "fingerprint",
+          language: "en",
+          extraction: {
+            extractorVersion: "dom-v5",
+            extractedAt: "2026-07-29T12:00:00.000Z",
+            wordCount: 3,
+          },
+        },
+        client: { extensionVersion: "0.1.0" },
+        preferences: { model: "gpt-5.6-luna", reasoningEffort: "medium" },
+      },
+      searchProvider: "free",
+    });
+    const store = new JobStore(storage);
+
+    await expect(store.get("legacy-job")).resolves.toMatchObject({
+      status: "failed",
+      runToken: null,
+      lastEventSequence: 0,
+    });
+    await expect(store.getResume("legacy-job")).resolves.toBeUndefined();
   });
 });

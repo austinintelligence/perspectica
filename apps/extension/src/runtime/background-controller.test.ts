@@ -375,6 +375,63 @@ describe("BackgroundController runtime protocol", () => {
     );
   });
 
+  it("rejects stale and terminal telemetry by run token", async () => {
+    const context = installChrome();
+    const controller = new BackgroundController();
+    const jobs = await putJob(context, job("analyzing"));
+    const entry = {
+      timestamp: "2026-07-29T12:00:00.000Z",
+      level: "info" as const,
+      scope: "test",
+      event: "test.event",
+      message: "safe diagnostic",
+      payload: null,
+    };
+
+    await expect(
+      dispatch(
+        controller,
+        {
+          type: "internal.analysis.log",
+          requestId: "stale-log",
+          jobId: "job-1",
+          runToken: "old-run",
+          entry,
+        },
+        sender("offscreen.html"),
+      ),
+    ).resolves.toMatchObject({ ok: true, data: { ignored: true } });
+    await expect(jobs.getLogs("job-1")).resolves.toEqual([]);
+
+    await expect(
+      dispatch(
+        controller,
+        {
+          type: "internal.analysis.log",
+          requestId: "current-log",
+          jobId: "job-1",
+          runToken: "run-1",
+          entry,
+        },
+        sender("offscreen.html"),
+      ),
+    ).resolves.toMatchObject({ ok: true, data: { accepted: true } });
+    await jobs.update("job-1", (current) => ({ ...current, status: "complete" }));
+    await expect(
+      dispatch(
+        controller,
+        {
+          type: "internal.analysis.log",
+          requestId: "terminal-log",
+          jobId: "job-1",
+          runToken: "run-1",
+          entry,
+        },
+        sender("offscreen.html"),
+      ),
+    ).resolves.toMatchObject({ ok: true, data: { ignored: true } });
+  });
+
   it("does not dispatch an already-terminal job during service-worker resume", async () => {
     const context = installChrome();
     const controller = new BackgroundController();

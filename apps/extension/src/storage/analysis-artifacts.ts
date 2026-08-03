@@ -1,7 +1,11 @@
+import { ArticleDocumentSchema } from "@perspectica/contracts";
+import { ArticleIndexSchema, type ArticleIndex } from "@perspectica/contracts/article";
+import {
+  SourceLedgerSnapshotSchema,
+  type SourceLedgerSnapshot,
+} from "@perspectica/contracts/evidence";
+import { AnalysisPlanSchema, type AnalysisPlan } from "@perspectica/contracts/report";
 import type { ArticleDocument } from "@perspectica/contracts";
-import type { ArticleIndex } from "@perspectica/contracts/article";
-import type { SourceLedgerSnapshot } from "@perspectica/contracts/evidence";
-import type { AnalysisPlan } from "@perspectica/contracts/report";
 import type { AnalysisBudget, AnalysisArtifacts } from "@perspectica/intelligence";
 import type { PipelineTelemetry } from "@perspectica/intelligence";
 
@@ -13,6 +17,7 @@ export interface AnalysisArtifactStore {
   set(jobId: string, runToken: string, artifacts: AnalysisArtifacts): Promise<void>;
   get(jobId: string, runToken: string): Promise<PersistedAnalysisArtifacts | null>;
   clear(jobId: string, runToken?: string): Promise<void>;
+  clearAll(): Promise<void>;
 }
 
 interface ArtifactRecord {
@@ -30,13 +35,14 @@ interface MemoryRecord {
 const DATABASE_NAME = "perspectica-analysis-artifacts-v1";
 const DATABASE_VERSION = 1;
 const STORE_NAME = "artifacts";
+const MAX_ARTIFACT_BYTES = 25 * 1024 * 1024;
 
 function key(jobId: string, runToken: string): string {
   return `${jobId}:${runToken}`;
 }
 
 function persistable(artifacts: AnalysisArtifacts): PersistedAnalysisArtifacts {
-  return {
+  const value = {
     analysisId: artifacts.analysisId,
     article: structuredClone(artifacts.article),
     index: structuredClone(artifacts.index),
@@ -45,17 +51,21 @@ function persistable(artifacts: AnalysisArtifacts): PersistedAnalysisArtifacts {
     telemetry: structuredClone(artifacts.telemetry),
     ledger: structuredClone(artifacts.ledger.snapshot()),
   };
+  if (JSON.stringify(value).length > MAX_ARTIFACT_BYTES) {
+    throw new Error("The analysis artifact is too large to retain safely.");
+  }
+  return value;
 }
 
 function restoreable(value: PersistedAnalysisArtifacts): PersistedAnalysisArtifacts {
   return {
     analysisId: value.analysisId,
-    article: value.article as ArticleDocument,
-    index: value.index as ArticleIndex,
-    plan: value.plan as AnalysisPlan,
+    article: ArticleDocumentSchema.parse(value.article),
+    index: ArticleIndexSchema.parse(value.index),
+    plan: AnalysisPlanSchema.parse(value.plan),
     budget: value.budget as AnalysisBudget,
     telemetry: value.telemetry as PipelineTelemetry,
-    ledger: value.ledger as SourceLedgerSnapshot,
+    ledger: SourceLedgerSnapshotSchema.parse(value.ledger),
   };
 }
 
@@ -69,15 +79,19 @@ export class IndexedDbAnalysisArtifactStore implements AnalysisArtifactStore {
       this.dbPromise = Promise.resolve(null);
       return this.dbPromise;
     }
-    this.dbPromise = new Promise((resolve) => {
+    this.dbPromise = new Promise((resolve, reject) => {
       const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
-      request.onerror = () => resolve(null);
+      request.onerror = () =>
+        reject(request.error ?? new Error("Could not open analysis artifacts."));
       request.onupgradeneeded = () => {
         if (!request.result.objectStoreNames.contains(STORE_NAME)) {
           request.result.createObjectStore(STORE_NAME, { keyPath: ["jobId", "runToken"] });
         }
       };
-      request.onsuccess = () => resolve(request.result);
+      request.onsuccess = () => {
+        request.result.onversionchange = () => request.result.close();
+        resolve(request.result);
+      };
     });
     return this.dbPromise;
   }
@@ -91,7 +105,7 @@ export class IndexedDbAnalysisArtifactStore implements AnalysisArtifactStore {
     this.memory.set(key(jobId, runToken), { expiresAt, artifacts: value });
     const db = await this.open();
     if (!db) return;
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       const transaction = db.transaction(STORE_NAME, "readwrite");
       transaction.objectStore(STORE_NAME).put({
         jobId,
@@ -108,7 +122,8 @@ export class IndexedDbAnalysisArtifactStore implements AnalysisArtifactStore {
         cursor.continue();
       };
       transaction.oncomplete = () => resolve();
-      transaction.onerror = () => resolve();
+      transaction.onerror = () =>
+        reject(transaction.error ?? new Error("Could not persist analysis artifacts."));
     });
   }
 
@@ -121,12 +136,13 @@ export class IndexedDbAnalysisArtifactStore implements AnalysisArtifactStore {
     }
     const db = await this.open();
     if (!db) return null;
-    const record = await new Promise<ArtifactRecord | null>((resolve) => {
+    const record = await new Promise<ArtifactRecord | null>((resolve, reject) => {
       const request = db
         .transaction(STORE_NAME, "readonly")
         .objectStore(STORE_NAME)
         .get([jobId, runToken]);
-      request.onerror = () => resolve(null);
+      request.onerror = () =>
+        reject(request.error ?? new Error("Could not read analysis artifacts."));
       request.onsuccess = () => resolve((request.result as ArtifactRecord | undefined) ?? null);
     });
     if (!record?.artifacts || record.expiresAt <= Date.now()) {
@@ -147,7 +163,7 @@ export class IndexedDbAnalysisArtifactStore implements AnalysisArtifactStore {
         if (cacheKey.startsWith(`${jobId}:`)) this.memory.delete(cacheKey);
     const db = await this.open();
     if (!db) return;
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       const transaction = db.transaction(STORE_NAME, "readwrite");
       if (runToken) {
         transaction.objectStore(STORE_NAME).delete([jobId, runToken]);
@@ -162,7 +178,21 @@ export class IndexedDbAnalysisArtifactStore implements AnalysisArtifactStore {
         };
       }
       transaction.oncomplete = () => resolve();
-      transaction.onerror = () => resolve();
+      transaction.onerror = () =>
+        reject(transaction.error ?? new Error("Could not clear analysis artifacts."));
+    });
+  }
+
+  async clearAll(): Promise<void> {
+    this.memory.clear();
+    const db = await this.open();
+    if (!db) return;
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction(STORE_NAME, "readwrite");
+      transaction.objectStore(STORE_NAME).clear();
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () =>
+        reject(transaction.error ?? new Error("Could not clear analysis artifacts."));
     });
   }
 }

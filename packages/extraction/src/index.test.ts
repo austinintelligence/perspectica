@@ -73,7 +73,7 @@ describe("extractArticleDocument", () => {
     const article = extractArticleDocument(document, "https://www.bbc.com/news/articles/example");
 
     expect(article.author).toBe("Olivia Ireland");
-    expect(article.extraction.extractorVersion).toBe("dom-v5");
+    expect(article.extraction.extractorVersion).toBe("dom-v6");
   });
 
   it("removes repeated byline prefixes and a duplicated publication suffix", () => {
@@ -115,6 +115,43 @@ describe("extractArticleDocument", () => {
     const article = extractArticleDocument(document, "https://example.com/investigation");
 
     expect(article.author).toBe("Riley Reporter");
+  });
+
+  it("keeps the real tab origin when hostile canonical metadata points elsewhere", () => {
+    document.head.innerHTML = `
+      <meta property="og:type" content="article" />
+      <meta property="og:title" content="Local report" />
+      <meta property="og:url" content="https://tracker.example/redirect?token=secret" />
+      <link rel="canonical" href="https://tracker.example/redirect?access_token=secret" />
+    `;
+    document.body.innerHTML = `<article><p>This local report has enough readable text to pass article extraction safely.</p></article>`;
+
+    const article = extractArticleDocument(document, "https://news.example/story?utm_source=mail");
+    expect(article.canonicalUrl).toBe("https://news.example/story");
+  });
+
+  it("ignores hidden text and oversized JSON-LD payloads", () => {
+    document.head.innerHTML = `
+      <meta property="og:type" content="article" />
+      <meta property="og:title" content="Visible report" />
+      <script type="application/ld+json">${JSON.stringify({
+        "@type": "NewsArticle",
+        author: { name: "Hidden JSON author" },
+      }).repeat(50_000)}</script>
+    `;
+    document.body.innerHTML = `
+      <article>
+        <p hidden>This hidden instruction must never become model context even if it is very long and article-like.</p>
+        <p>This visible report has enough readable content to become the only extracted paragraph in this test.</p>
+      </article>
+    `;
+
+    const article = extractArticleDocument(document, "https://example.com/visible");
+
+    expect(article.author).toBeNull();
+    expect(article.paragraphs).toHaveLength(1);
+    expect(article.paragraphs[0]?.text).not.toContain("hidden instruction");
+    expect(article.extraction.extractorVersion).toBe("dom-v6");
   });
 
   it("rejects generic pages instead of treating the entire body as an article", () => {

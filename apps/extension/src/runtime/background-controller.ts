@@ -7,6 +7,8 @@ import { CredentialVault } from "../storage/credential-vault";
 import { IndexedDbCryptoKeyStore } from "../storage/indexed-db-key-store";
 import { JobStore } from "../storage/job-store";
 import { EvidenceCache } from "../storage/evidence-cache";
+import { EncryptedAnalysisHistoryStore } from "../storage/analysis-history";
+import { IndexedDbAnalysisArtifactStore } from "../storage/analysis-artifacts";
 import { PreferencesStore } from "../storage/preferences-store";
 import {
   AnalysisJobSchema,
@@ -23,6 +25,7 @@ import {
   type ExtensionResponse,
   type InternalRequest,
   type RuntimeState,
+  type SearchProviderKind,
 } from "./messages";
 import { describeError, redactText, redactUrl, serializeRedacted } from "./redaction";
 import {
@@ -221,8 +224,12 @@ export class BackgroundController {
     chrome.runtime.id,
   );
   private readonly preferences = new PreferencesStore(this.local);
-  private readonly jobs = new JobStore(this.local);
   private readonly researchCache = new EvidenceCache();
+  private readonly artifactStore = new IndexedDbAnalysisArtifactStore();
+  private readonly history = new EncryptedAnalysisHistoryStore(this.vault);
+  private readonly jobs = new JobStore(this.local, undefined, this.history, () =>
+    this.clearTransientResearch(),
+  );
   private readonly auth = new ChatGptSessionManager(this.session, this.local, this.vault);
   private initialization: Promise<void> | null = null;
   private readonly ports = new Set<chrome.runtime.Port>();
@@ -276,6 +283,34 @@ export class BackgroundController {
     };
   }
 
+  private async cacheScopeFor(provider: SearchProviderKind): Promise<string> {
+    if (provider === "chatgpt") {
+      const accountId = (await this.auth.getState()).account?.accountId;
+      return `chatgpt:${accountId ?? "anonymous"}`;
+    }
+    if (provider === "free") return "free:public";
+    try {
+      const credential = await this.vault.readExa();
+      if (!credential) return "exa:unconfigured";
+      const digest = await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(credential.apiKey),
+      );
+      const bytes = new Uint8Array(digest);
+      return `exa:${Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")}`;
+    } catch {
+      return "exa:unconfigured";
+    }
+  }
+
+  private async clearTransientResearch(): Promise<void> {
+    await Promise.all([this.researchCache.clearAll(), this.artifactStore.clearAll()]);
+  }
+
+  private async clearAccountData(): Promise<void> {
+    await Promise.all([this.clearTransientResearch(), this.jobs.clearHistory()]);
+  }
+
   /** Re-dispatch a persisted non-terminal run after a worker/offscreen restart. */
   async resumeActiveJob(): Promise<void> {
     if (this.resumeInFlight) return this.resumeInFlight;
@@ -295,6 +330,21 @@ export class BackgroundController {
         return;
       }
       try {
+        const cacheScope = resume.cacheScope ?? (await this.cacheScopeFor(resume.searchProvider));
+        if (resume.cacheScope && cacheScope !== resume.cacheScope) {
+          const failed = await this.jobs.update(job.id, (current) => ({
+            ...current,
+            status: "failed",
+            runToken: null,
+            revision: current.revision + 1,
+            updatedAt: now(),
+            error:
+              "The previous analysis belonged to a different provider session. Start a new analysis.",
+          }));
+          await this.clearTransientResearch();
+          if (failed) await this.publish({ type: "analysis.jobChanged", job: failed });
+          return;
+        }
         await ensureCompatibleOffscreenDocument();
         await chrome.runtime.sendMessage(
           OffscreenCommandSchema.parse({
@@ -305,6 +355,7 @@ export class BackgroundController {
             initialSequence: job.lastEventSequence,
             request: resume.request,
             searchProvider: resume.searchProvider,
+            cacheScope,
           }),
         );
         await this.publish({ type: "analysis.jobChanged", job });
@@ -383,6 +434,7 @@ export class BackgroundController {
       throw new Error("Add an Exa API key in Perspectica settings before analyzing.");
     }
     const { tabId, tabUrl, article } = await this.extractActiveArticle();
+    const cacheScope = await this.cacheScopeFor(preferences.searchProvider);
     // Disconnect can race extraction. Re-check ownership immediately before
     // creating a resumable job so a stale token cannot start a new run.
     await this.auth.getFreshTokens();
@@ -425,6 +477,7 @@ export class BackgroundController {
         },
       },
       searchProvider: preferences.searchProvider,
+      cacheScope,
     };
     const command = OffscreenCommandSchema.parse({
       type: "offscreen.analysis.start",
@@ -434,6 +487,7 @@ export class BackgroundController {
       initialSequence: 0,
       request: resume.request,
       searchProvider: preferences.searchProvider,
+      cacheScope,
     });
     await this.saveAndPushJob(job, resume);
     try {
@@ -524,6 +578,10 @@ export class BackgroundController {
     if (!resume || resume.runToken !== current.runToken) {
       throw new Error("The bounded retry context is unavailable. Start a new analysis.");
     }
+    const cacheScope = resume.cacheScope ?? (await this.cacheScopeFor(resume.searchProvider));
+    if (resume.cacheScope && cacheScope !== resume.cacheScope) {
+      throw new Error("The bounded retry context belongs to a different provider session.");
+    }
     await this.auth.getFreshTokens();
     const retrying = await this.jobs.update(jobId, (job) => {
       if (job.status !== "partial" || job.runToken !== current.runToken) return undefined;
@@ -548,6 +606,7 @@ export class BackgroundController {
           initialSequence: retrying.lastEventSequence,
           request: resume.request,
           searchProvider: resume.searchProvider,
+          cacheScope,
           sections,
         }),
       );
@@ -586,12 +645,20 @@ export class BackgroundController {
         case "auth.getPending":
           return ok(request.requestId, await this.auth.pendingAuthorization());
         case "auth.poll": {
+          const previousAccountId = (await this.auth.getState()).account?.accountId ?? null;
           const result = await this.auth.poll();
-          if (result.status === "authenticated") await this.pushAuth();
+          if (result.status === "authenticated") {
+            const nextAccountId = result.state.account?.accountId ?? null;
+            if (previousAccountId && nextAccountId && previousAccountId !== nextAccountId) {
+              await this.clearTransientResearch();
+            }
+            await this.pushAuth();
+          }
           return ok(request.requestId, result);
         }
         case "auth.disconnect": {
           await this.cancelActiveAnalysisForDisconnect();
+          await this.clearAccountData();
           const state = await this.auth.disconnect();
           await this.publish({ type: "auth.changed", auth: state });
           return ok(request.requestId, state);
@@ -614,6 +681,7 @@ export class BackgroundController {
           return ok(request.requestId, { available: true });
         case "providers.clearExaKey":
           await this.vault.remove("exa");
+          await this.clearTransientResearch();
           return ok(request.requestId, { removed: true });
         case "providers.test": {
           if (request.provider === "exa") {
@@ -685,7 +753,7 @@ export class BackgroundController {
           return ok(request.requestId, { removed: true, jobId: job.id });
         }
         case "research.cache.clear":
-          await this.researchCache.clear();
+          await this.clearTransientResearch();
           return ok(request.requestId, { removed: true });
         case "analysis.cancel":
           return ok(request.requestId, await this.cancelAnalysis(request.jobId));
@@ -735,7 +803,8 @@ export class BackgroundController {
         }
         case "internal.analysis.log": {
           const job = await this.jobs.get(request.jobId);
-          if (!job) return ok(request.requestId, { ignored: true });
+          if (!job || terminal(job.status) || !job.runToken || job.runToken !== request.runToken)
+            return ok(request.requestId, { ignored: true });
           await this.jobs.appendLog(request.jobId, request.entry);
           return ok(request.requestId, { accepted: true });
         }

@@ -47,6 +47,17 @@ describe("runtime redaction", () => {
     expect(result).toContain("…");
   });
 
+  it("strips all URL query and hash state from diagnostic serialization", () => {
+    const result = serializeRedacted({
+      url: "https://example.com/story?edition=us#paragraph-2",
+      message: "https://example.com/story?edition=us#paragraph-2",
+    });
+
+    expect(result).toContain("https://example.com/story");
+    expect(result).not.toContain("edition=us");
+    expect(result).not.toContain("paragraph-2");
+  });
+
   it("describes errors without exposing credential-shaped values", () => {
     expect(describeError(new Error("refresh_token=hidden"))).toBe("refresh_token=[redacted]");
     expect(describeError(undefined, "fallback")).toBe("fallback");

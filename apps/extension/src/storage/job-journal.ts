@@ -22,9 +22,10 @@ export class AnalysisJournal {
       this.dbPromise = Promise.resolve(null);
       return this.dbPromise;
     }
-    this.dbPromise = new Promise((resolve) => {
+    this.dbPromise = new Promise((resolve, reject) => {
       const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
-      request.onerror = () => resolve(null);
+      request.onerror = () =>
+        reject(request.error ?? new Error("Could not open analysis journal."));
       request.onupgradeneeded = () => {
         const db = request.result;
         if (!db.objectStoreNames.contains(EVENT_STORE)) {
@@ -36,7 +37,10 @@ export class AnalysisJournal {
           logs.createIndex("job", "jobId", { unique: false });
         }
       };
-      request.onsuccess = () => resolve(request.result);
+      request.onsuccess = () => {
+        request.result.onversionchange = () => request.result.close();
+        resolve(request.result);
+      };
     });
     return this.dbPromise;
   }
@@ -62,12 +66,12 @@ export class AnalysisJournal {
     if (cached) return structuredClone(cached);
     const db = await this.open();
     if (!db) return undefined;
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const request = db
         .transaction(EVENT_STORE, "readonly")
         .objectStore(EVENT_STORE)
         .get([jobId, sequence]);
-      request.onerror = () => resolve(undefined);
+      request.onerror = () => reject(request.error ?? new Error("Could not read analysis event."));
       request.onsuccess = () => {
         const value = request.result as AnalysisEnvelope | undefined;
         if (value) this.eventMemory.set(memoryKey(jobId, sequence), structuredClone(value));
@@ -89,12 +93,12 @@ export class AnalysisJournal {
         .slice(0, limit)
         .map((event) => structuredClone(event));
     }
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const values: AnalysisEnvelope[] = [];
       const tx = db.transaction(EVENT_STORE, "readonly");
       const range = IDBKeyRange.bound([jobId, afterSequence + 1], [jobId, Number.MAX_SAFE_INTEGER]);
       const request = tx.objectStore(EVENT_STORE).openCursor(range);
-      request.onerror = () => resolve([]);
+      request.onerror = () => reject(request.error ?? new Error("Could not read analysis events."));
       request.onsuccess = () => {
         const cursor = request.result;
         if (!cursor || values.length >= limit) {
@@ -112,7 +116,7 @@ export class AnalysisJournal {
       if (key.startsWith(`${jobId}:`)) this.eventMemory.delete(key);
     const db = await this.open();
     if (!db) return;
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(EVENT_STORE, "readwrite");
       const request = tx.objectStore(EVENT_STORE).index("job").openCursor(IDBKeyRange.only(jobId));
       request.onsuccess = () => {
@@ -122,7 +126,7 @@ export class AnalysisJournal {
         cursor.continue();
       };
       tx.oncomplete = () => resolve();
-      tx.onerror = () => resolve();
+      tx.onerror = () => reject(tx.error ?? new Error("Could not clear analysis events."));
     });
   }
 
@@ -133,11 +137,11 @@ export class AnalysisJournal {
     this.logMemory.set(jobId, next);
     const db = await this.open();
     if (db) {
-      await new Promise<void>((resolve) => {
+      await new Promise<void>((resolve, reject) => {
         const tx = db.transaction(LOG_STORE, "readwrite");
         tx.objectStore(LOG_STORE).put({ jobId, ...entry });
         tx.oncomplete = () => resolve();
-        tx.onerror = () => resolve();
+        tx.onerror = () => reject(tx.error ?? new Error("Could not append analysis log."));
       });
     }
     return entry;
@@ -148,11 +152,11 @@ export class AnalysisJournal {
     if (cached) return structuredClone(cached);
     const db = await this.open();
     if (!db) return [];
-    const result = await new Promise<AnalysisLogEntry[]>((resolve) => {
+    const result = await new Promise<AnalysisLogEntry[]>((resolve, reject) => {
       const values: AnalysisLogEntry[] = [];
       const tx = db.transaction(LOG_STORE, "readonly");
       const request = tx.objectStore(LOG_STORE).index("job").openCursor(IDBKeyRange.only(jobId));
-      request.onerror = () => resolve([]);
+      request.onerror = () => reject(request.error ?? new Error("Could not read analysis logs."));
       request.onsuccess = () => {
         const cursor = request.result;
         if (!cursor) {
@@ -174,7 +178,7 @@ export class AnalysisJournal {
     this.logMemory.delete(jobId);
     const db = await this.open();
     if (!db) return;
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(LOG_STORE, "readwrite");
       const request = tx.objectStore(LOG_STORE).index("job").openCursor(IDBKeyRange.only(jobId));
       request.onsuccess = () => {
@@ -184,7 +188,7 @@ export class AnalysisJournal {
         cursor.continue();
       };
       tx.oncomplete = () => resolve();
-      tx.onerror = () => resolve();
+      tx.onerror = () => reject(tx.error ?? new Error("Could not clear analysis logs."));
     });
   }
 }

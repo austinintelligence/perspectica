@@ -130,4 +130,18 @@ describe("CredentialVault", () => {
     expect(await vault.has("chatgpt")).toBe(false);
     expect(keys.values.size).toBe(0);
   });
+
+  it("encrypts bounded analysis history separately from provider credentials", async () => {
+    const storage = new MemoryStorage();
+    const keys = new MemoryKeyStore();
+    const vault = new CredentialVault(storage, keys, "extension-a");
+    const history = [{ jobId: "job-1", articleText: "private article text" }];
+
+    await vault.writeAnalysisHistory(history);
+
+    await expect(vault.readAnalysisHistory<typeof history>()).resolves.toEqual(history);
+    expect(JSON.stringify([...storage.values.values()])).not.toContain("private article text");
+    await vault.remove("analysis");
+    await expect(vault.readAnalysisHistory()).resolves.toBeUndefined();
+  });
 });
