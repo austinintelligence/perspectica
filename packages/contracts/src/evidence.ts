@@ -6,7 +6,7 @@ const text = z.string().trim().min(1);
 export const ContentKindSchema = z.enum(["source-text", "search-summary"]);
 export type ContentKind = z.infer<typeof ContentKindSchema>;
 
-export const EvidenceProviderSchema = z.enum(["exa", "chatgpt"]);
+export const EvidenceProviderSchema = z.enum(["free", "chatgpt", "exa"]);
 export type EvidenceProvider = z.infer<typeof EvidenceProviderSchema>;
 
 export const SourceTypeV2Schema = z.enum([

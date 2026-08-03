@@ -107,9 +107,9 @@ export class NativeChatGptEvidenceRetriever implements EvidenceRetriever {
         prompt,
         maxRetries: 1,
         timeout: {
-          totalMs: Math.min(60_000, Math.max(1_000, plan.deadlineAt - Date.now())),
-          firstChunkMs: 45_000,
-          chunkMs: 30_000,
+          // Overall depth budgets bound the request. Quiet reasoning between
+          // chunks is not itself a failure condition.
+          totalMs: Math.max(1_000, plan.deadlineAt - Date.now()),
         },
       });
       const sources = result.sources

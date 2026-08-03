@@ -45,6 +45,20 @@ describe("extension runtime protocol", () => {
         },
       }).success,
     ).toBe(true);
+    expect(
+      OffscreenCommandSchema.safeParse({
+        type: "offscreen.providers.test",
+        protocol: PERSPECTICA_RUNTIME_PROTOCOL,
+        provider: "free",
+        cacheScope: "account-scope-v1",
+        preferences: {
+          model: "gpt-5.6-luna",
+          reasoningEffort: "medium",
+          mode: "quick",
+          depth: "quick",
+        },
+      }).success,
+    ).toBe(true);
   });
 
   it("uses an explicit offscreen handshake to prevent mixed unpacked builds", () => {
@@ -98,5 +112,36 @@ describe("extension runtime protocol", () => {
     expect(InternalRequestSchema.safeParse(base).success).toBe(true);
     expect(InternalRequestSchema.safeParse({ ...base, sequence: 0 }).success).toBe(false);
     expect(InternalRequestSchema.safeParse({ ...base, runToken: "" }).success).toBe(false);
+    expect(
+      InternalRequestSchema.safeParse({
+        type: "internal.analysis.log",
+        requestId: "request-4",
+        jobId: "job-1",
+        runToken: "run-1",
+        entry: {
+          timestamp: "2026-07-29T12:00:00.000Z",
+          level: "info",
+          scope: "pipeline",
+          event: "phase.snapshot",
+          message: "snapshot",
+          payload: null,
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      InternalRequestSchema.safeParse({
+        type: "internal.analysis.log",
+        requestId: "request-5",
+        jobId: "job-1",
+        entry: {
+          timestamp: "2026-07-29T12:00:00.000Z",
+          level: "info",
+          scope: "pipeline",
+          event: "phase.snapshot",
+          message: "snapshot",
+          payload: null,
+        },
+      }).success,
+    ).toBe(false);
   });
 });

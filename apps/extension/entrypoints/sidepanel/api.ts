@@ -4,6 +4,7 @@ import type { ReportSection } from "@perspectica/contracts/report";
 import { sendRuntimeRequest, subscribeRuntimePushWithStatus } from "../../src/runtime/client";
 import type {
   AnalysisJob,
+  ArticlePreview,
   AuthState,
   DeviceAuthorization,
   ExtensionPreferences,
@@ -24,6 +25,9 @@ export async function requestChatGptHostAccess(): Promise<void> {
 
 export function getRuntimeState(): Promise<RuntimeState> {
   return sendRuntimeRequest<RuntimeState>({ type: "runtime.getState" });
+}
+export function getArticlePreview(): Promise<ArticlePreview> {
+  return sendRuntimeRequest<ArticlePreview>({ type: "article.preview" });
 }
 export function beginChatGptLogin(remember: boolean): Promise<DeviceAuthorization> {
   return sendRuntimeRequest<DeviceAuthorization>({ type: "auth.begin", remember });
@@ -135,10 +139,15 @@ export async function streamAnalysis(
   if (signal?.aborted) throw abortError();
   const runtime = await getRuntimeState();
   if (preferences) {
+    const preferencesWithLegacyMode = preferences as AnalysisPreferences & {
+      mode?: ExtensionPreferences["mode"];
+    };
     await updateExtensionPreferences({
       ...runtime.preferences,
       model: preferences.model,
       reasoningEffort: preferences.reasoningEffort,
+      ...(preferencesWithLegacyMode.mode ? { mode: preferencesWithLegacyMode.mode } : {}),
+      ...(preferences.depth ? { depth: preferences.depth } : {}),
     });
   }
   if (options?.retrySections?.length && !runtime.activeJob) {

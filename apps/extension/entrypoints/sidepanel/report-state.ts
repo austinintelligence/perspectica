@@ -8,6 +8,7 @@ import type {
   JournalistContextResult,
   SourceListResult,
 } from "@perspectica/contracts";
+import { normalizeCanonicalUrl } from "@perspectica/contracts";
 import type { AnalysisPlan, ReportSection } from "@perspectica/contracts/report";
 
 export type LoadStatus = "waiting" | "loading" | "ready" | "empty" | "error";
@@ -175,6 +176,54 @@ function failed<T>(section: SectionState<T>, message: string): SectionState<T> {
   return { ...section, status: "error", error: message };
 }
 
+function sourceKey(url: string): string {
+  return normalizeCanonicalUrl(url) ?? url.trim().toLocaleLowerCase("en-US");
+}
+
+function sourceKeys(section: EvidenceSection | AdditionalContextResult | null): Set<string> {
+  return new Set((section?.sources ?? []).map((source) => sourceKey(source.url)));
+}
+
+function withoutSources<T extends EvidenceSection | AdditionalContextResult>(
+  section: T,
+  blocked: ReadonlySet<string>,
+): T {
+  const sources = section.sources.filter((source) => !blocked.has(sourceKey(source.url)));
+  if (sources.length === section.sources.length) return section;
+
+  const sourceIds = new Set(sources.map((source) => source.id));
+  const groundedFindings = (section.readerCopy?.findings ?? []).filter(
+    (finding) =>
+      finding.citationIds.length > 0 && finding.citationIds.every((id) => sourceIds.has(id)),
+  );
+  const groundedSummary = [
+    ...new Set(sources.map((source) => source.relationshipExplanation.trim()).filter(Boolean)),
+  ].join(" ");
+  return {
+    ...section,
+    status: sources.length > 0 ? section.status : "empty",
+    summary:
+      sources.length > 0
+        ? groundedSummary.slice(0, 2_000) || "Distinct verified evidence remains below."
+        : "No distinct verified sources remain.",
+    sources,
+    readerCopy:
+      groundedFindings.length > 0
+        ? {
+            lead: groundedSummary.slice(0, 1_000) || "Distinct verified evidence remains below.",
+            findings: groundedFindings,
+          }
+        : undefined,
+  } as T;
+}
+
+function pruneLoadedSection<T extends EvidenceSection | AdditionalContextResult>(
+  section: SectionState<T>,
+  blocked: ReadonlySet<string>,
+): SectionState<T> {
+  return section.data ? loaded(withoutSources(section.data, blocked)) : section;
+}
+
 function failIncompleteSection<T>(
   section: SectionState<T>,
   message = "This section could not be completed. Try again.",
@@ -182,6 +231,36 @@ function failIncompleteSection<T>(
   return section.status === "ready" || section.status === "empty"
     ? section
     : failed(section, section.error ?? message);
+}
+
+function failSection(state: ReportState, section: ReportSection, message: string): ReportState {
+  const failedSections = state.failedSections.includes(section)
+    ? state.failedSections
+    : [...state.failedSections, section];
+  switch (section) {
+    case "compass":
+      return { ...state, failedSections, compass: failed(state.compass, message) };
+    case "bias":
+      return { ...state, failedSections, bias: failed(state.bias, message) };
+    case "journalist-context":
+      return {
+        ...state,
+        failedSections,
+        journalistContext: failed(state.journalistContext, message),
+      };
+    case "supporting":
+      return { ...state, failedSections, supporting: failed(state.supporting, message) };
+    case "contradicting":
+      return { ...state, failedSections, contradicting: failed(state.contradicting, message) };
+    case "additional-context":
+      return {
+        ...state,
+        failedSections,
+        additionalContext: failed(state.additionalContext, message),
+      };
+    case "works-cited":
+      return { ...state, failedSections, sourceList: failed(state.sourceList, message) };
+  }
 }
 
 function phaseForPipeline(phase: PipelinePhase): ReportPhase {
@@ -282,14 +361,39 @@ export function reducePipelineEvent(state: ReportState, event: PipelineEvent): R
           return { ...state, bias: loaded(event.data.data) };
         case "journalist-context":
           return { ...state, journalistContext: loaded(event.data.data) };
-        case "supporting":
-          return { ...state, supporting: loaded(event.data.data) };
-        case "contradicting":
-          return { ...state, contradicting: loaded(event.data.data) };
-        case "additional-context":
-          return { ...state, additionalContext: loaded(event.data.data) };
+        case "supporting": {
+          const supporting = withoutSources(event.data.data, sourceKeys(state.contradicting.data));
+          const blocked = new Set([
+            ...sourceKeys(supporting),
+            ...sourceKeys(state.contradicting.data),
+          ]);
+          return {
+            ...state,
+            supporting: loaded(supporting),
+            additionalContext: pruneLoadedSection(state.additionalContext, blocked),
+          };
+        }
+        case "contradicting": {
+          const contradicting = event.data.data;
+          const blocked = sourceKeys(contradicting);
+          return {
+            ...state,
+            contradicting: loaded(contradicting),
+            supporting: pruneLoadedSection(state.supporting, blocked),
+            additionalContext: pruneLoadedSection(state.additionalContext, blocked),
+          };
+        }
+        case "additional-context": {
+          const blocked = new Set([
+            ...sourceKeys(state.supporting.data),
+            ...sourceKeys(state.contradicting.data),
+          ]);
+          return { ...state, additionalContext: loaded(withoutSources(event.data.data, blocked)) };
+        }
       }
       return state;
+    case "section.failed":
+      return failSection(state, event.data.section, event.data.message);
     case "analysis.completed":
       return {
         ...state,
@@ -300,6 +404,9 @@ export function reducePipelineEvent(state: ReportState, event: PipelineEvent): R
             ? "Report complete with limited external evidence."
             : "Report complete.",
         failedSections: event.data.failedSections,
+        sourceList: event.data.failedSections.includes("works-cited")
+          ? failIncompleteSection(state.sourceList)
+          : state.sourceList,
         compass: event.data.failedSections.includes("compass")
           ? failIncompleteSection(state.compass)
           : state.compass,

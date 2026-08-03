@@ -94,6 +94,17 @@ export class EvidenceLedger {
     };
   }
 
+  markMissionsFailed(missionIds: readonly string[], reason: string): void {
+    const planned = new Set(this.plan.missions.map((mission) => mission.id));
+    for (const missionId of missionIds) {
+      if (!planned.has(missionId)) continue;
+      this.completedMissions.delete(missionId);
+      this.failedMissions.add(missionId);
+    }
+    const message = reason.trim();
+    if (message) this.rejectedReasons.push(message.slice(0, 500));
+  }
+
   /**
    * Accept only decisions produced by the bounded adjudicator. Every source
    * identity and reader-facing assertion is reconstructed from the candidate

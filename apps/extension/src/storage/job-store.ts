@@ -10,6 +10,10 @@ import {
 } from "../runtime/messages";
 import type { AnalysisEnvelope, PipelineEvent } from "@perspectica/contracts/events";
 import type { JsonStorageArea } from "./areas";
+import type {
+  EncryptedAnalysisHistoryEntry,
+  EncryptedAnalysisHistoryStore,
+} from "./analysis-history";
 import { AnalysisJournal } from "./job-journal";
 
 const ACTIVE_JOB_KEY = "perspectica.jobs.active.v1";
@@ -26,6 +30,12 @@ export interface EventCommitResult {
   envelope?: AnalysisEnvelope;
 }
 
+export interface AnalysisResumeVault {
+  get(jobId: string): Promise<AnalysisResumeData | undefined>;
+  set(jobId: string, resume: AnalysisResumeData): Promise<void>;
+  remove(jobId: string): Promise<void>;
+}
+
 export class JobStore {
   private readonly logTails = new Map<string, Promise<void>>();
   private mutationTail: Promise<void> = Promise.resolve();
@@ -33,11 +43,39 @@ export class JobStore {
   constructor(
     private readonly storage: JsonStorageArea,
     private readonly journal = new AnalysisJournal(),
+    private readonly history?: Pick<EncryptedAnalysisHistoryStore, "get" | "retain" | "clear">,
+    private readonly onLegacyInvalidated?: () => Promise<void>,
+    private readonly resumeVault?: AnalysisResumeVault,
   ) {}
 
   async get(id: string): Promise<AnalysisJob | undefined> {
-    const parsed = AnalysisJobSchema.safeParse(await this.storage.get(`${JOB_PREFIX}${id}`));
-    return parsed.success ? parsed.data : undefined;
+    const raw = await this.storage.get(`${JOB_PREFIX}${id}`);
+    const parsed = AnalysisJobSchema.safeParse(raw);
+    if (!parsed.success) return undefined;
+    const resume = await this.storage.get(`${RESUME_PREFIX}${id}`);
+    if (!isLegacyJobRecord(raw, resume)) return parsed.data;
+
+    // V1 event bodies are a different wire protocol. Never replay them as V2
+    // pipeline events; invalidate the interrupted report instead of showing a
+    // blank terminal report or dispatching an incompatible resume payload.
+    const invalidated = AnalysisJobSchema.parse({
+      ...parsed.data,
+      events: [],
+      status: "failed",
+      runToken: null,
+      revision: parsed.data.revision + 1,
+      lastEventSequence: 0,
+      updatedAt: new Date().toISOString(),
+      error: "This analysis was interrupted by an extension update. Start a new analysis.",
+    });
+    await Promise.all([
+      this.storage.set(`${JOB_PREFIX}${id}`, invalidated),
+      this.storage.remove(`${RESUME_PREFIX}${id}`),
+      this.journal.clearEvents(id),
+      this.journal.clearLogs(id),
+    ]);
+    await this.onLegacyInvalidated?.();
+    return invalidated;
   }
 
   private enqueueMutation<T>(operation: () => Promise<T>): Promise<T> {
@@ -59,18 +97,26 @@ export class JobStore {
       this.storage.set(ACTIVE_JOB_KEY, parsed.id),
     ];
     if (resume) {
-      writes.push(
-        this.storage.set(`${RESUME_PREFIX}${parsed.id}`, AnalysisResumeDataSchema.parse(resume)),
-      );
+      const parsedResume = AnalysisResumeDataSchema.parse(resume);
+      if (this.resumeVault) {
+        writes.push(
+          this.resumeVault.set(parsed.id, parsedResume),
+          this.storage.remove(`${RESUME_PREFIX}${parsed.id}`),
+        );
+      } else {
+        writes.push(this.storage.set(`${RESUME_PREFIX}${parsed.id}`, parsedResume));
+      }
     } else if (["complete", "partial", "failed", "cancelled"].includes(parsed.status)) {
       // Terminal jobs must not be restarted after a service-worker restart.
       writes.push(this.storage.remove(`${RESUME_PREFIX}${parsed.id}`));
+      if (this.resumeVault) writes.push(this.resumeVault.remove(parsed.id));
     }
     await Promise.all(writes);
     if (previousId && previousId !== parsed.id) {
       await Promise.all([
         this.storage.remove(`${JOB_PREFIX}${previousId}`),
         this.storage.remove(`${RESUME_PREFIX}${previousId}`),
+        ...(this.resumeVault ? [this.resumeVault.remove(previousId)] : []),
       ]);
       await Promise.all([this.journal.clearEvents(previousId), this.journal.clearLogs(previousId)]);
     }
@@ -96,10 +142,16 @@ export class JobStore {
   }
 
   async getResume(id: string): Promise<AnalysisResumeData | undefined> {
-    const parsed = AnalysisResumeDataSchema.safeParse(
-      await this.storage.get(`${RESUME_PREFIX}${id}`),
-    );
-    return parsed.success ? parsed.data : undefined;
+    const encrypted = await this.resumeVault?.get(id);
+    if (encrypted) return AnalysisResumeDataSchema.parse(encrypted);
+    const key = `${RESUME_PREFIX}${id}`;
+    const parsed = AnalysisResumeDataSchema.safeParse(await this.storage.get(key));
+    if (!parsed.success) return undefined;
+    if (this.resumeVault) {
+      await this.resumeVault.set(id, parsed.data);
+      await this.storage.remove(key);
+    }
+    return parsed.data;
   }
 
   async getActive(): Promise<AnalysisJob | undefined> {
@@ -110,6 +162,23 @@ export class JobStore {
   async clearActive(id?: string): Promise<void> {
     const active = await this.storage.get<string>(ACTIVE_JOB_KEY);
     if (!id || active === id) await this.storage.remove(ACTIVE_JOB_KEY);
+  }
+
+  /** Remove the active report and every same-job replay/telemetry artifact. */
+  async clearActiveData(): Promise<void> {
+    await this.enqueueMutation(async () => {
+      const active = await this.storage.get<string>(ACTIVE_JOB_KEY);
+      if (!active) return;
+      await Promise.all([
+        this.storage.remove(`${JOB_PREFIX}${active}`),
+        this.storage.remove(`${RESUME_PREFIX}${active}`),
+        this.storage.remove(`${LOG_PREFIX}${active}`),
+        this.resumeVault?.remove(active),
+        this.journal.clearEvents(active),
+        this.journal.clearLogs(active),
+      ]);
+      await this.storage.remove(ACTIVE_JOB_KEY);
+    });
   }
 
   async appendLog(id: string, input: AnalysisLogInput): Promise<void> {
@@ -141,6 +210,14 @@ export class JobStore {
   async clearLogs(id: string): Promise<void> {
     await this.journal.clearLogs(id);
     await this.storage.remove(`${LOG_PREFIX}${id}`);
+  }
+
+  async getHistory(): Promise<EncryptedAnalysisHistoryEntry[]> {
+    return this.history ? this.history.get() : [];
+  }
+
+  async clearHistory(): Promise<void> {
+    await this.history?.clear();
   }
 
   /**
@@ -215,6 +292,15 @@ export class JobStore {
       error: null,
     });
     await this.setUnsafe(updated);
+    if (terminal && this.history) {
+      try {
+        const events = await this.journal.eventsSince(current.id, 0, 512);
+        await this.history.retain(updated, events);
+      } catch {
+        // Encrypted retention is a convenience archive. Journal durability
+        // and the active report must not depend on vault/quota availability.
+      }
+    }
     return updated;
   }
 
@@ -229,4 +315,24 @@ export class JobStore {
 
 function terminalStatus(status: AnalysisJob["status"]): boolean {
   return ["complete", "partial", "failed", "cancelled"].includes(status);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isLegacyJobRecord(value: unknown, resume: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if ("analysisId" in value) return true;
+  if (Array.isArray(value.events) && value.events.length > 0) return true;
+  if (value.status !== "queued" && value.status !== "extracting" && value.status !== "analyzing") {
+    return false;
+  }
+  if (typeof value.runToken !== "string") return true;
+  if (value.searchProvider === "free") return true;
+  if (isRecord(resume) && isRecord(resume.request)) {
+    const preferences = resume.request.preferences;
+    if (isRecord(preferences) && !("mode" in preferences)) return true;
+  }
+  return false;
 }

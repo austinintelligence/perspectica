@@ -1,5 +1,26 @@
 # Perspectica
 
+## Install Perspectica
+
+### Chrome Web Store (recommended)
+
+The Chrome Web Store is the consumer installation and automatic-update channel. Open the official
+listing, confirm the publisher and permissions, and choose **Add to Chrome**. Chrome, Edge, and
+Brave are supported on macOS and Windows; the release checklist remains policy-conditional until
+the public listing has passed review.
+
+### GitHub developer release
+
+Tagged [GitHub Releases](https://github.com/drperky20/perspectica/releases) include the self-contained extension ZIP, checksums, an
+SBOM, provenance, and small macOS/Windows setup helpers. The helper verifies the ZIP, installs it
+to a stable local directory, detects supported browsers, opens the selected browser's extensions
+page, and reveals the directory to choose with **Load unpacked**. Browser security still requires
+that one visible Developer Mode action; the helper never changes browser policy or silently
+installs code.
+
+See [browser support](docs/browser-support.md), [release installation](tools/installer/README.md),
+and [troubleshooting](docs/troubleshooting.md) before using the developer channel.
+
 Perspectica is a self-contained Chrome side-panel extension for source-grounded news
 transparency. It examines political framing, bias signals, journalist context, supporting and
 contradicting information, and the sources cited by an article.
@@ -7,7 +28,7 @@ contradicting information, and the sources cited by an article.
 Perspectica helps readers inspect an article. It does not replace reading the article, determine
 whether a person is trustworthy, or assign a permanent political label to a publication.
 
-## About us
+## Built by
 
 Perspectica was created by:
 
@@ -16,25 +37,29 @@ Perspectica was created by:
 - **Mathew Estis** — Developer & project coordination
 - **Jordan Allen** — Brand design & QA testing
 
-The same team credits are available from the extension's first-run **About us** panel.
+The same team credits are available from the extension's first-run **About us** section and
+Settings → **About** screen.
 
 ## How it works
 
 Everything runs inside the installed extension:
 
-1. The user opens Perspectica and chooses **Login with ChatGPT**. Chrome requests only the narrow
-   OpenAI origins needed for the device flow and inference.
-2. During article-access onboarding, the user separately grants a remembered all-sites permission
-   so Perspectica can extract the active page when a report starts or is reopened.
-3. An offscreen extension document runs the analysis pipeline so MV3 service-worker suspension
-   does not interrupt longer work.
-4. The extension uses the user's connected ChatGPT account for inference.
-5. Research uses either the user's Exa API key or ChatGPT hosted web search when the selected
-   account and model support it.
-6. Validated pipeline events are appended to an IndexedDB journal and streamed into the side panel through a reconnectable runtime port.
+1. Open a news article and review the local article preview. Nothing is sent to a provider yet.
+2. Choose Quick, Balanced, Deep, or Verified research and select **Analyze article**.
+3. Article Lens identifies claims and framing, then one bounded research coordinator builds a
+   deduplicated source pool for the whole report.
+4. Perspective and evidence evaluators use the same source ledger in parallel. Deterministic
+   validation removes unsupported quotations, unsafe URLs, duplicate claims, and wrong-lane
+   evidence before sections appear.
+5. A reconnectable event journal streams each section to the side panel and supports cancellation,
+   resume, and targeted section retries without restarting completed work.
 
-There is no Perspectica API, hosted database, localhost service, telemetry service, or required
-Codex installation.
+Research can use the keyless Free lane, authenticated ChatGPT discovery, or a user-supplied Exa
+key. Search summaries are never quoted as source text; a quotation requires a fetched publisher
+page and exact-excerpt validation.
+
+There is no Perspectica API, hosted database, localhost service, telemetry service, hosting bill,
+or required Codex installation.
 
 ## Privacy model
 
@@ -47,7 +72,8 @@ Codex installation.
 - The non-exportable encryption key is stored separately in IndexedDB.
 - Access tokens are kept in `chrome.storage.session` and refreshed when needed.
 - Exa API keys are encrypted by the same local vault.
-- Article text and research queries are sent only to the providers the user selects.
+- Article text and research queries are sent only after Analyze and only to the configured
+  inference/research providers and validated public source pages needed for the requested report.
 - Perspectica does not operate a server that receives credentials, article text, or analysis
   history.
 
@@ -66,7 +92,8 @@ apps/extension/        WXT Manifest V3 extension, side panel, background and off
 packages/contracts/    shared Zod wire contracts, budgets, events and evidence graph types
 packages/extraction/   page-to-article extraction and deterministic ArticleIndex construction
 packages/intelligence/ Article Lens, adaptive planning, retrieval coordination and report projection
-docs/                   current architecture, privacy, release and product notes
+tools/installer/        audited GitHub developer-channel setup helper
+docs/                   architecture, privacy, security, release and support notes
 ```
 
 The implemented V2 runtime is documented in [`docs/architecture-v2.md`](docs/architecture-v2.md).
@@ -137,16 +164,20 @@ See [`docs/public-deployment.md`](docs/public-deployment.md) for the store check
 ## Analysis architecture
 
 V2 builds one compact `ArticleIndex`, creates an adaptive `AnalysisPlan`, and runs a global
-`RetrievalCoordinator` against a shared source ledger and evidence graph. Fast, balanced, and deep
-modes change passage, mission, concurrency, deadline, and output budgets. Providers return
+`RetrievalCoordinator` against a shared source ledger and evidence graph. Quick, Balanced, Deep,
+and Verified depths change passage, mission, concurrency, source, model-call, and time budgets.
+Providers return
 candidate sources only; a bounded adjudication step maps exact candidate IDs to article claims and
 relationships, and centralized validation is required before an assertion can serve any report
 section. The side panel only projects validated ledger assertions.
 
-Exa uses bounded search requests with returned text/highlights. Native ChatGPT web search is one
-bounded global search workflow: its URL-attributed results are `search-summary` evidence and are
-never treated as page transcripts or quoteable excerpts. Login with ChatGPT remains the sole
-account/authentication path; Exa is an optional research provider key, not a second account system.
+The one-dimensional spectrum stays on `-3…+3`. Article framing supplies exactly half of the
+placement evidence, while verified publication and journalist context share the remaining half.
+Outside reporting may refine context but cannot manufacture an article position. “Unclear” is
+reserved for runs where the article and all contextual research provide no defensible signal.
+
+See [V2 architecture](docs/architecture-v2.md), [provider boundaries](docs/provider-boundaries.md),
+[privacy](docs/privacy.md), and the [threat model](docs/threat-model.md).
 
 ## Optional calibration tooling
 

@@ -17,6 +17,8 @@ store-ready ZIP under `apps/extension/.output`. Live development uses the separa
 Only the production directory and ZIP are release artifacts.
 `verify:release` also inspects the generated package and rejects local environment files,
 databases, datasets, and other development-only artifacts.
+Tag releases must use `vX.Y.Z`, with the root package, extension package, and generated manifest
+at the same `X.Y.Z` version; the release workflow rejects mismatches before publishing.
 
 ## Pre-release inspection
 

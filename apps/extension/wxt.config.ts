@@ -1,4 +1,18 @@
 import { defineConfig } from "wxt";
+import { readFileSync } from "node:fs";
+
+const extensionPackage = JSON.parse(
+  readFileSync(new URL("./package.json", import.meta.url), "utf8"),
+) as { version?: unknown };
+const extensionVersion =
+  typeof extensionPackage.version === "string" &&
+  /^\d+\.\d+\.\d+(?:\.\d+)?$/.test(extensionPackage.version)
+    ? extensionPackage.version
+    : (() => {
+        throw new Error(
+          "apps/extension/package.json must contain a valid Chrome extension version.",
+        );
+      })();
 
 export default defineConfig({
   modules: ["@wxt-dev/module-react"],
@@ -13,7 +27,7 @@ export default defineConfig({
   manifest: {
     name: "Perspectica",
     description: "See the article's political framing, bias signals, and evidence.",
-    version: "0.1.0",
+    version: extensionVersion,
     permissions: ["scripting", "storage", "offscreen"],
     // Onboarding requests this optional grant from a direct user gesture.
     // Chrome remembers it so article extraction works after navigation.

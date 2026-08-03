@@ -6,6 +6,7 @@ interface SectionProps {
   title: string;
   status: LoadStatus;
   error?: string | null;
+  onRetry?: () => void;
   children: ReactNode;
 }
 
@@ -13,7 +14,7 @@ export function shouldRenderSection(status: LoadStatus): boolean {
   return status !== "empty";
 }
 
-export function Section({ id, title, status, error, children }: SectionProps) {
+export function Section({ id, title, status, error, onRetry, children }: SectionProps) {
   const headingId = `${id}-heading`;
   if (!shouldRenderSection(status)) return null;
 
@@ -30,9 +31,14 @@ export function Section({ id, title, status, error, children }: SectionProps) {
           <span className="sr-only">Loading {title}</span>
         </div>
       ) : status === "error" ? (
-        <p className="section-error" role="alert">
-          {error ?? "This section could not be completed."}
-        </p>
+        <div className="section-error" role="alert">
+          <p>{error ?? "This section could not be completed."}</p>
+          {onRetry ? (
+            <button className="section-retry" type="button" onClick={onRetry}>
+              Retry {title}
+            </button>
+          ) : null}
+        </div>
       ) : (
         <div className="section-content">{children}</div>
       )}

@@ -1,4 +1,8 @@
-import { AnalysisPreferencesSchema, ArticleDocumentSchema } from "@perspectica/contracts";
+import {
+  AnalysisPreferencesSchema,
+  ArticleDocumentSchema,
+  ContentTypeSchema,
+} from "@perspectica/contracts";
 import { AnalysisModeSchema } from "@perspectica/contracts/preferences";
 import { PipelineEventSchema } from "@perspectica/contracts/events";
 import { ReportSectionSchema } from "@perspectica/contracts/report";
@@ -10,6 +14,7 @@ const requiredText = z.string().trim().min(1);
 const requestId = requiredText.max(128);
 const jobId = requiredText.max(128);
 const runToken = requiredText.max(128);
+const cacheScope = requiredText.max(256).nullable().optional();
 const sequence = z.number().int().nonnegative();
 
 // Increment this whenever the side panel, service worker, and offscreen
@@ -18,7 +23,7 @@ const sequence = z.number().int().nonnegative();
 // MV3 service worker or offscreen document.
 export const PERSPECTICA_RUNTIME_PROTOCOL = 6;
 
-export const SearchProviderSchema = z.enum(["exa", "chatgpt"]);
+export const SearchProviderSchema = z.enum(["free", "chatgpt", "exa"]);
 export type SearchProviderKind = z.infer<typeof SearchProviderSchema>;
 
 export const ExtensionPreferencesSchema = AnalysisPreferencesSchema.extend({
@@ -32,7 +37,8 @@ export const DEFAULT_EXTENSION_PREFERENCES: ExtensionPreferences = {
   model: "gpt-5.6-luna",
   reasoningEffort: "medium",
   mode: "balanced",
-  searchProvider: "exa",
+  depth: "balanced",
+  searchProvider: "free",
   rememberChatGpt: true,
 };
 
@@ -115,6 +121,17 @@ export const AnalysisJobSchema = z.object({
 });
 export type AnalysisJob = z.infer<typeof AnalysisJobSchema>;
 
+export const ArticlePreviewSchema = z.object({
+  title: requiredText.max(2_000),
+  author: z.string().trim().max(2_000).nullable(),
+  publication: z.string().trim().max(1_000).nullable(),
+  publishedAt: z.string().datetime({ offset: true }).nullable(),
+  contentType: ContentTypeSchema,
+  tabUrl: z.string().url(),
+  articleFingerprint: requiredText.max(128),
+});
+export type ArticlePreview = z.infer<typeof ArticlePreviewSchema>;
+
 export const OffscreenAnalysisRequestSchema = z.object({
   article: ArticleDocumentSchema,
   client: z.object({ extensionVersion: requiredText.max(100) }),
@@ -128,8 +145,15 @@ export const AnalysisResumeDataSchema = z.object({
   runToken,
   request: OffscreenAnalysisRequestSchema,
   searchProvider: SearchProviderSchema,
+  cacheScope,
 });
 export type AnalysisResumeData = z.infer<typeof AnalysisResumeDataSchema>;
+
+export const EncryptedResumeEnvelopeSchema = z.object({
+  jobId,
+  resume: AnalysisResumeDataSchema,
+});
+export type EncryptedResumeEnvelope = z.infer<typeof EncryptedResumeEnvelopeSchema>;
 
 export const RUNTIME_PORT_NAME = "perspectica.runtime" as const;
 
@@ -163,6 +187,7 @@ export const ExtensionRequestSchema = z.discriminatedUnion("type", [
     type: z.literal("providers.test"),
     provider: SearchProviderSchema,
   }),
+  baseRequest.extend({ type: z.literal("article.preview") }),
   baseRequest.extend({ type: z.literal("analysis.start"), forceNew: z.boolean().optional() }),
   baseRequest.extend({
     type: z.literal("analysis.retry"),
@@ -200,6 +225,7 @@ export const InternalRequestSchema = z.discriminatedUnion("type", [
   baseRequest.extend({
     type: z.literal("internal.analysis.log"),
     jobId,
+    runToken,
     entry: AnalysisLogInputSchema,
   }),
   baseRequest.extend({
@@ -232,6 +258,7 @@ export const OffscreenCommandSchema = z.discriminatedUnion("type", [
     initialSequence: sequence.default(0),
     request: OffscreenAnalysisRequestSchema,
     searchProvider: SearchProviderSchema,
+    cacheScope,
   }),
   z.object({
     type: z.literal("offscreen.analysis.cancel"),
@@ -247,6 +274,7 @@ export const OffscreenCommandSchema = z.discriminatedUnion("type", [
     initialSequence: sequence.default(0),
     request: OffscreenAnalysisRequestSchema,
     searchProvider: SearchProviderSchema,
+    cacheScope,
     sections: z.array(ReportSectionSchema).min(1).max(6),
   }),
   z.object({
@@ -254,6 +282,7 @@ export const OffscreenCommandSchema = z.discriminatedUnion("type", [
     protocol: z.literal(PERSPECTICA_RUNTIME_PROTOCOL),
     provider: SearchProviderSchema,
     preferences: AnalysisPreferencesSchema.extend({ mode: AnalysisModeSchema }),
+    cacheScope,
   }),
 ]);
 export type OffscreenCommand = z.infer<typeof OffscreenCommandSchema>;

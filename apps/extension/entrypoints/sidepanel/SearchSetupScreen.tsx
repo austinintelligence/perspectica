@@ -35,8 +35,10 @@ export function SearchSetupScreen({
       if (!test.available) {
         throw new Error(
           provider === "chatgpt"
-            ? "Native ChatGPT search is not available for this account. Choose Exa."
-            : "Exa did not confirm the connection.",
+            ? "ChatGPT search is not available for this account. Choose Free or Exa."
+            : provider === "exa"
+              ? "Exa did not confirm the connection."
+              : "Free search is temporarily unavailable. Choose another source or try again.",
         );
       }
       await onChange({ ...preferences, searchProvider: provider });
@@ -53,12 +55,24 @@ export function SearchSetupScreen({
       <BrandHeader action="menu" actionLabel="Open preferences" onAction={onOpenSettings} />
       <main className="connection-main search-setup-main">
         <p className="eyebrow">Research provider</p>
-        <h1>Choose web search</h1>
+        <h1 data-route-heading tabIndex={-1}>
+          Choose web search
+        </h1>
         <p className="connection-lede">
           Perspectica uses outside sources to check and contextualize the article.
         </p>
 
         <div className="provider-options" role="radiogroup" aria-label="Search provider">
+          <button
+            type="button"
+            role="radio"
+            aria-checked={provider === "free"}
+            className={provider === "free" ? "selected" : undefined}
+            onClick={() => setProvider("free")}
+          >
+            <strong>Free</strong>
+            <span>No key required. Uses bounded public news and reference sources.</span>
+          </button>
           <button
             type="button"
             role="radio"

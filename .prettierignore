@@ -7,4 +7,5 @@ dist
 node_modules
 output
 pnpm-lock.yaml
+**/target/
 tmp

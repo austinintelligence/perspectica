@@ -175,8 +175,9 @@ describe("V2 intelligence pipeline", () => {
     expect(events.at(-1)?.type).toBe("analysis.cancelled");
   });
 
-  it("turns an empty provider error into a valid terminal failure event", async () => {
+  it("degrades a failed adjudication without discarding the article-derived report", async () => {
     const events = [];
+    let telemetry: { debugRing: string[] } | undefined;
     const emptyErrorAdjudicator: EvidenceAdjudicator = {
       async adjudicate() {
         throw new Error("");
@@ -188,13 +189,67 @@ describe("V2 intelligence pipeline", () => {
       adjudicator: emptyErrorAdjudicator,
       mode: "fast",
       reasoningEffort: "low",
+      onTelemetry: (value) => {
+        telemetry = value;
+      },
     }))
       events.push(event);
 
-    expect(events.at(-1)?.type).toBe("analysis.failed");
-    const failure = events.at(-1);
-    if (failure?.type === "analysis.failed")
-      expect(failure.data.message).toBe("The analysis pipeline failed.");
+    expect(events.at(-1)?.type).toBe("analysis.completed");
+    const completion = events.at(-1);
+    if (completion?.type === "analysis.completed") {
+      expect(completion.data.status).toBe("partial");
+      expect(completion.data.failedSections).not.toContain("compass");
+      expect(completion.data.failedSections).not.toContain("bias");
+    }
+    expect(telemetry?.debugRing.some((entry) => entry.includes("adjudication.degraded"))).toBe(
+      true,
+    );
+  });
+
+  it("retains article-led spectrum and bias when contextual retrieval fails", async () => {
+    const failedRetriever = {
+      async *retrieve(plan: RetrievalPlan): AsyncIterable<EvidenceBatch> {
+        for (const mission of plan.missions) {
+          yield {
+            missionId: mission.id,
+            provider: "free" as const,
+            candidates: [],
+            coveredMissionIds: [mission.id],
+            status: "failed" as const,
+            error: "free discovery unavailable",
+            searched: true,
+            cacheHit: false,
+            durationMs: 1,
+          };
+        }
+      },
+    };
+    const events = [];
+    for await (const event of analyzeArticle({
+      article: article(),
+      retriever: failedRetriever,
+      mode: "balanced",
+      reasoningEffort: "medium",
+    }))
+      events.push(event);
+
+    const perspective = events.find((event) => event.type === "perspective.ready");
+    expect(perspective?.type).toBe("perspective.ready");
+    if (perspective?.type === "perspective.ready") {
+      expect(perspective.data.compass?.score).not.toBeNull();
+      expect(perspective.data.compass?.evidence.length).toBeGreaterThan(0);
+    }
+    const failedSections = events
+      .filter((event) => event.type === "section.failed")
+      .map((event) => (event.type === "section.failed" ? event.data.section : null));
+    expect(failedSections).not.toContain("compass");
+    expect(failedSections).not.toContain("bias");
+    const completion = events.find((event) => event.type === "analysis.completed");
+    if (completion?.type === "analysis.completed") {
+      expect(completion.data.failedSections).not.toContain("compass");
+      expect(completion.data.failedSections).not.toContain("bias");
+    }
   });
 
   it("retries only requested lanes from the existing artifacts", async () => {

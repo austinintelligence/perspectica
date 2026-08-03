@@ -1,0 +1,51 @@
+name: Bug report
+description: Report a reproducible problem in Perspectica.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include provider keys, ChatGPT tokens, private article text, or exported logs with secrets.
+  - type: input
+    id: version
+    attributes:
+      label: Perspectica version
+      placeholder: v0.1.0 or development commit
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and version
+      placeholder: Chrome 140 on macOS 15
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Include the provider choice and whether the issue survives a fresh profile.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and sanitized diagnostics
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed credentials, tokens, private article text, and sensitive URLs.
+          required: true
+        - label: This is not a security vulnerability; I will use private reporting for security issues.
+          required: true

@@ -1,5 +1,9 @@
 import { PipelineEventSchema, type PipelineEvent } from "@perspectica/contracts/events";
-import { AnalysisMetadataSchema, type ArticleDocument } from "@perspectica/contracts";
+import {
+  AnalysisMetadataSchema,
+  type ArticleDocument,
+  type ResearchDepth,
+} from "@perspectica/contracts";
 import type { ArticleIndex } from "@perspectica/contracts/article";
 import type { EvidenceRetriever } from "@perspectica/contracts/evidence";
 import type { AnalysisPlan, ReportSection } from "@perspectica/contracts/report";
@@ -8,7 +12,11 @@ import {
   INTELLIGENCE_PROMPT_VERSION,
 } from "@perspectica/contracts/limits";
 import { buildArticleIndex } from "@perspectica/extraction";
-import { resolveAnalysisBudget, type AnalysisBudget } from "./budgets";
+import {
+  resolveAnalysisBudget,
+  type AnalysisBudget,
+  type LegacyAnalysisBudgetMode,
+} from "./budgets";
 import { createAnalysisPlan } from "./planning/lens";
 import { EvidenceLedger } from "./evidence/source-ledger";
 import { retryMissingSections as retryRetrieval, runRetrieval } from "./retrieval/coordinator";
@@ -25,7 +33,8 @@ export interface AnalysisInput {
   analysisId?: string;
   modelVersion?: string;
   reasoningEffort?: "none" | "low" | "medium" | "high" | "xhigh" | "max";
-  mode?: AnalysisBudget["mode"];
+  mode?: AnalysisBudget["mode"] | LegacyAnalysisBudgetMode;
+  depth?: ResearchDepth;
   signal?: AbortSignal;
   now?: () => Date;
   createId?: () => string;
@@ -111,6 +120,7 @@ export async function* analyzeArticle(input: AnalysisInput): AsyncGenerator<Pipe
     reasoningEffort: input.reasoningEffort ?? "medium",
     startedAt: startedAt.toISOString(),
     contentType: input.article.contentType,
+    researchDepth: input.depth ?? (budget.mode === "quick" ? "quick" : budget.mode),
   });
   const emit = (type: PipelineEvent["type"], data: unknown): PipelineEvent => {
     const event = createEvent(type, analysisId, data, now);
@@ -207,6 +217,28 @@ export async function* analyzeArticle(input: AnalysisInput): AsyncGenerator<Pipe
       budget,
       signal: input.signal,
       adjudicator: input.adjudicator,
+      onAttempt: () => {
+        telemetry.modelCalls += 1;
+      },
+      onFailure: (error, failedCandidates) => {
+        const missionIds = [
+          ...new Set(
+            failedCandidates.flatMap((candidate) =>
+              candidate.missionId
+                ? [candidate.missionId]
+                : plan.missions.map((mission) => mission.id),
+            ),
+          ),
+        ];
+        ledger.markMissionsFailed(
+          missionIds,
+          pipelineErrorMessage(error, "Evidence adjudication was unavailable."),
+        );
+        noteTelemetry(
+          telemetry,
+          `adjudication.degraded=${pipelineErrorMessage(error, "model batch unavailable")}`,
+        );
+      },
     });
     ledger.acceptAdjudications(decisions);
     yield emit("ledger.updated", {
@@ -259,7 +291,15 @@ export async function* analyzeArticle(input: AnalysisInput): AsyncGenerator<Pipe
         "additional-context",
       ],
       ledger,
+      projected,
     );
+    for (const section of failedSections) {
+      yield emit("section.failed", {
+        section,
+        message: "This section needs another evidence pass.",
+        retryable: true,
+      });
+    }
     const status = failedSections.length > 0 ? "partial" : "complete";
     yield emit("phase.changed", {
       phase: status === "complete" ? "complete" : "partial",
@@ -293,12 +333,23 @@ export async function* analyzeArticle(input: AnalysisInput): AsyncGenerator<Pipe
 function failedSectionsForReport(
   sections: readonly ReportSection[],
   ledger: EvidenceLedger,
+  projected: ReturnType<typeof projectReport>,
 ): ReportSection[] {
-  return sections.filter((section) =>
-    ledger.plan.missions.some(
+  return sections.filter((section) => {
+    const hasFailedMission = ledger.plan.missions.some(
       (mission) => ledger.isMissionFailed(mission.id) && mission.canServeSections.includes(section),
-    ),
-  );
+    );
+    if (!hasFailedMission) return false;
+    if (ledger.hasEvidenceForSection(section)) return false;
+    // Bias is projected from article-owned language. A failed context mission
+    // cannot invalidate it. Likewise, retain a defensible article-led compass
+    // and let the contextual copy disclose that no outside signal was verified.
+    if (section === "bias") return false;
+    if (section === "compass") {
+      return projected.compass.score === null || projected.compass.evidence.length === 0;
+    }
+    return section !== "works-cited";
+  });
 }
 
 /** Retry only requested report lanes against the existing evidence graph. */
@@ -355,6 +406,28 @@ export async function* retryArticleSections(
       budget: artifacts.budget,
       signal,
       adjudicator: input.adjudicator,
+      onAttempt: () => {
+        artifacts.telemetry.modelCalls += 1;
+      },
+      onFailure: (error, failedCandidates) => {
+        const missionIds = [
+          ...new Set(
+            failedCandidates.flatMap((candidate) =>
+              candidate.missionId
+                ? [candidate.missionId]
+                : artifacts.plan.missions.map((mission) => mission.id),
+            ),
+          ),
+        ];
+        artifacts.ledger.markMissionsFailed(
+          missionIds,
+          pipelineErrorMessage(error, "Evidence adjudication was unavailable."),
+        );
+        noteTelemetry(
+          artifacts.telemetry,
+          `retry.adjudication.degraded=${pipelineErrorMessage(error, "model batch unavailable")}`,
+        );
+      },
     });
     artifacts.ledger.acceptAdjudications(decisions);
     const perspective = synthesizePerspective(artifacts.index, artifacts.plan, artifacts.ledger);
@@ -393,9 +466,18 @@ export async function* retryArticleSections(
     }
     if (input.sections.includes("works-cited"))
       yield emit("worksCited.ready", projected.sourceList);
-    const failedSections = failedSectionsForReport(input.sections, artifacts.ledger).filter(
-      (section) => section !== "works-cited",
-    );
+    const failedSections = failedSectionsForReport(
+      input.sections,
+      artifacts.ledger,
+      projected,
+    ).filter((section) => section !== "works-cited");
+    for (const section of failedSections) {
+      yield emit("section.failed", {
+        section,
+        message: "This section remains limited by the available evidence.",
+        retryable: true,
+      });
+    }
     const completedAt = now();
     yield emit("phase.changed", {
       phase: failedSections.length > 0 ? "partial" : "complete",

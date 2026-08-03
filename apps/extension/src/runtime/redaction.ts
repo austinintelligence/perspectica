@@ -21,6 +21,14 @@ function redactUrlToken(value: string): string {
   return `${normalized ?? "https://[redacted-url]"}${trailing}`;
 }
 
+function redactDiagnosticText(value: string): string {
+  return redactText(value).replace(URL_PATTERN, (url) => {
+    const trailing = url.match(/[),.;!?]+$/)?.[0] ?? "";
+    const candidate = trailing ? url.slice(0, -trailing.length) : url;
+    return `${redactUrl(candidate)}${trailing}`;
+  });
+}
+
 /** Redacts secrets, credentials, and sensitive URL material from free text. */
 export function redactText(value: string): string {
   return value
@@ -36,7 +44,17 @@ export function redactText(value: string): string {
  */
 export function redactUrl(value: string): string {
   const normalized = normalizeCanonicalUrl(value);
-  return normalized ?? "[redacted URL]";
+  if (!normalized) return "[redacted URL]";
+  try {
+    const url = new URL(normalized);
+    // Diagnostic URLs never need query state. Even a currently-benign query
+    // can become a credential or signed request after a provider redirect.
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return "[redacted URL]";
+  }
 }
 
 function isSensitiveField(key: string): boolean {
@@ -62,13 +80,13 @@ export function serializeRedacted(
         if (item instanceof Error) {
           return {
             name: item.name,
-            message: redactText(item.message),
-            stack: item.stack ? redactText(item.stack) : undefined,
+            message: redactDiagnosticText(item.message),
+            stack: item.stack ? redactDiagnosticText(item.stack) : undefined,
             cause: item.cause,
           };
         }
         if (typeof item === "string") {
-          const redacted = redactText(item);
+          const redacted = redactDiagnosticText(item);
           return redacted.length > maxStringLength
             ? `${redacted.slice(0, maxStringLength - 1)}…`
             : redacted;
@@ -83,11 +101,13 @@ export function serializeRedacted(
     );
   } catch (error) {
     serialized = JSON.stringify({
-      serializationError: redactText(error instanceof Error ? error.message : String(error)),
-      value: redactText(String(value)),
+      serializationError: redactDiagnosticText(
+        error instanceof Error ? error.message : String(error),
+      ),
+      value: redactDiagnosticText(String(value)),
     });
   }
-  return redactText(serialized).slice(0, maxOutputLength);
+  return redactDiagnosticText(serialized).slice(0, maxOutputLength);
 }
 
 export function describeError(error: unknown, fallback = "Unknown error"): string {

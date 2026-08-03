@@ -104,6 +104,14 @@ export const PipelineEventSchema = z.discriminatedUnion("type", [
       z.object({ section: z.literal("additional-context"), data: AdditionalContextResultSchema }),
     ]),
   ),
+  event(
+    "section.failed",
+    z.object({
+      section: ReportSectionSchema,
+      message: text.max(1_000),
+      retryable: z.boolean(),
+    }),
+  ),
   event("worksCited.ready", SourceListResultSchema),
   event(
     "analysis.completed",

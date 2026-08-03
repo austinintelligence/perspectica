@@ -1,6 +1,8 @@
 import type { AnalysisReasoningEffort } from "@perspectica/contracts";
 import { ANALYSIS_LIMITS, type AnalysisBudgetMode } from "@perspectica/contracts/limits";
 
+export type LegacyAnalysisBudgetMode = "fast";
+
 export interface AnalysisBudget {
   mode: AnalysisBudgetMode;
   deepPassageCharacters: number;
@@ -9,19 +11,31 @@ export interface AnalysisBudget {
   maxSources: number;
   maxConcurrency: number;
   totalDeadlineMs: number;
+  maxSearchQueries: number;
+  maxSearchResults: number;
+  maxSourceReads: number;
+  maxModelSteps: number;
+  maxArticleContextChars: number;
+  maxSourceContextChars: number;
+  specialistTimeoutMs: number;
   modelOutputTokens: number;
   reasoningEffort: AnalysisReasoningEffort;
 }
 
+function canonicalMode(mode: AnalysisBudgetMode | LegacyAnalysisBudgetMode): AnalysisBudgetMode {
+  return mode === "fast" ? "quick" : mode;
+}
+
 export function resolveAnalysisBudget(
-  mode: AnalysisBudgetMode = "balanced",
+  mode: AnalysisBudgetMode | LegacyAnalysisBudgetMode = "balanced",
   reasoningEffort: AnalysisReasoningEffort = "medium",
 ): AnalysisBudget {
-  const limits = ANALYSIS_LIMITS[mode];
+  const canonical = canonicalMode(mode);
+  const limits = ANALYSIS_LIMITS[canonical];
   return {
     ...limits,
-    mode,
+    mode: canonical,
     reasoningEffort,
-    modelOutputTokens: mode === "fast" ? 1_600 : mode === "deep" ? 3_000 : 2_200,
+    modelOutputTokens: limits.modelOutputTokens,
   };
 }

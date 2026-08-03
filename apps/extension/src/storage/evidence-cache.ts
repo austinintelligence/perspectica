@@ -13,10 +13,22 @@ interface CacheRecord<T> {
 const DATABASE_NAME = "perspectica-evidence-cache-v1";
 const DATABASE_VERSION = 1;
 const STORE_NAME = "results";
+const memoryCaches = new Map<string, Map<string, CacheRecord<unknown>>>();
 
 export class EvidenceCache implements EvidenceResultCache {
-  private readonly memory = new Map<string, CacheRecord<unknown>>();
+  private readonly memory: Map<string, CacheRecord<unknown>>;
+  private readonly normalizedScope: string;
   private dbPromise: Promise<IDBDatabase | null> | null = null;
+
+  constructor(scope = "global") {
+    this.normalizedScope = scope.trim().slice(0, 256) || "global";
+    this.memory = memoryCaches.get(this.normalizedScope) ?? new Map();
+    memoryCaches.set(this.normalizedScope, this.memory);
+  }
+
+  private scopedKey(key: string): string {
+    return `${this.normalizedScope}:${key}`;
+  }
 
   private open(): Promise<IDBDatabase | null> {
     if (this.dbPromise) return this.dbPromise;
@@ -39,35 +51,38 @@ export class EvidenceCache implements EvidenceResultCache {
 
   async get<T>(key: string): Promise<T | null> {
     const now = Date.now();
-    if (typeof indexedDB === "undefined") {
-      const memory = this.memory.get(key);
-      if (memory) {
-        if (memory.expiresAt > now) return structuredClone(memory.value) as T;
-        this.memory.delete(key);
-      }
+    const storageKey = this.scopedKey(key);
+    const memory = this.memory.get(storageKey);
+    if (memory) {
+      if (memory.expiresAt > now) return structuredClone(memory.value) as T;
+      this.memory.delete(storageKey);
     }
     const db = await this.open();
     if (!db) return null;
     const record = await new Promise<CacheRecord<T> | null>((resolve) => {
-      const request = db.transaction(STORE_NAME, "readonly").objectStore(STORE_NAME).get(key);
+      const request = db
+        .transaction(STORE_NAME, "readonly")
+        .objectStore(STORE_NAME)
+        .get(storageKey);
       request.onerror = () => resolve(null);
       request.onsuccess = () => resolve((request.result as CacheRecord<T> | undefined) ?? null);
     });
     if (!record || record.expiresAt <= now) {
-      if (record) await this.delete(key);
+      if (record) await this.delete(storageKey);
       return null;
     }
-    this.memory.set(key, structuredClone(record));
+    this.memory.set(storageKey, structuredClone(record));
     return structuredClone(record.value);
   }
 
   async set<T>(key: string, value: T, ttlMs: number): Promise<void> {
+    const storageKey = this.scopedKey(key);
     const record: CacheRecord<T> = {
-      key,
+      key: storageKey,
       expiresAt: Date.now() + Math.max(1, ttlMs),
       value: structuredClone(value),
     };
-    this.memory.set(key, structuredClone(record));
+    this.memory.set(storageKey, structuredClone(record));
     const db = await this.open();
     if (!db) return;
     await new Promise<void>((resolve) => {
@@ -90,14 +105,40 @@ export class EvidenceCache implements EvidenceResultCache {
   }
 
   async clear(): Promise<void> {
-    this.memory.clear();
+    await this.clearScope(this.normalizedScope);
+  }
+
+  async clearScope(scope: string): Promise<void> {
+    const prefix = `${scope.trim().slice(0, 256) || "global"}:`;
+    for (const key of this.memory.keys()) {
+      if (key.startsWith(prefix)) this.memory.delete(key);
+    }
     const db = await this.open();
     if (!db) return;
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      const request = tx.objectStore(STORE_NAME).openCursor();
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) return;
+        const record = cursor.value as CacheRecord<unknown>;
+        if (record.key.startsWith(prefix)) cursor.delete();
+        cursor.continue();
+      };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error ?? new Error("Could not clear evidence cache."));
+    });
+  }
+
+  async clearAll(): Promise<void> {
+    for (const memory of memoryCaches.values()) memory.clear();
+    const db = await this.open();
+    if (!db) return;
+    await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, "readwrite");
       tx.objectStore(STORE_NAME).clear();
       tx.oncomplete = () => resolve();
-      tx.onerror = () => resolve();
+      tx.onerror = () => reject(tx.error ?? new Error("Could not clear evidence cache."));
     });
   }
 }

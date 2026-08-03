@@ -13,6 +13,8 @@ const article = {
 const preferences = {
   model: "gpt-5.6-luna" as const,
   reasoningEffort: "medium" as const,
+  mode: "balanced" as const,
+  depth: "balanced" as const,
   searchProvider: "exa" as const,
 };
 const configFingerprint = createAnalysisConfigFingerprint(preferences);
@@ -37,8 +39,37 @@ function job(overrides: Partial<AnalysisJob> = {}): AnalysisJob {
 }
 
 describe("canReuseAnalysisJob", () => {
+  it("includes V2 pipeline versions and depth in the reuse fingerprint", () => {
+    expect(configFingerprint).toContain("analysis-config-v2");
+    expect(configFingerprint).toContain("intelligence-graph-v2");
+    expect(configFingerprint).toContain(":balanced:balanced:exa");
+  });
+
   it("reuses a report when tab, canonical URL, and fingerprint match", () => {
     expect(canReuseAnalysisJob(job(), article, 7, configFingerprint)).toBe(true);
+  });
+
+  it("uses the browser tab URL instead of page-supplied canonical metadata", () => {
+    expect(
+      canReuseAnalysisJob(
+        job(),
+        { ...article, canonicalUrl: "https://attacker.example/spoofed" },
+        7,
+        configFingerprint,
+        false,
+        "https://example.com/story",
+      ),
+    ).toBe(true);
+    expect(
+      canReuseAnalysisJob(
+        job(),
+        article,
+        7,
+        configFingerprint,
+        false,
+        "https://example.com/a-different-story",
+      ),
+    ).toBe(false);
   });
 
   it("does not reuse a same-URL report for a changed article fingerprint", () => {
@@ -70,7 +101,10 @@ describe("canReuseAnalysisJob", () => {
     const changed = [
       createAnalysisConfigFingerprint({ ...preferences, model: "gpt-5.6-sol" }),
       createAnalysisConfigFingerprint({ ...preferences, reasoningEffort: "high" }),
+      createAnalysisConfigFingerprint({ ...preferences, mode: "deep" }),
+      createAnalysisConfigFingerprint({ ...preferences, depth: "verified" }),
       createAnalysisConfigFingerprint({ ...preferences, searchProvider: "chatgpt" }),
+      createAnalysisConfigFingerprint(preferences, "exa:different-key"),
     ];
 
     for (const fingerprint of changed) {

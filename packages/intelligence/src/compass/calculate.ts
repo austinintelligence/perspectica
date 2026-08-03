@@ -27,6 +27,80 @@ function label(score: number): CompassResult["label"] {
   return "far-right";
 }
 
+function roundedScore(value: number): number {
+  return Math.round(clamp(value, -3, 3) * 100) / 100;
+}
+
+function contextScore(context: PoliticalContextResult): {
+  score: number;
+  weight: number;
+} {
+  const placementSignals = context.signals.filter(
+    (signal) =>
+      signal.sourceKind === "publication-history" || signal.sourceKind === "journalist-work",
+  );
+  const weighted = placementSignals.reduce(
+    (total, signal) => total + signal.score * signal.strength * signal.relevance,
+    0,
+  );
+  const weight = placementSignals.reduce(
+    (total, signal) => total + signal.strength * signal.relevance,
+    0,
+  );
+  return { score: weight > 0 ? roundedScore(weighted / weight) : 0, weight };
+}
+
+function contextCounts(context: PoliticalContextResult) {
+  return {
+    publication: context.signals.filter((signal) => signal.sourceKind === "publication-history")
+      .length,
+    journalist: context.signals.filter((signal) => signal.sourceKind === "journalist-work").length,
+    comparableCoverage: context.signals.filter(
+      (signal) => signal.sourceKind === "comparable-coverage",
+    ).length,
+    topicContext: context.signals.filter((signal) => signal.sourceKind === "topic-context").length,
+  };
+}
+
+function contextInfluence(
+  context: PoliticalContextResult,
+  contextWeight: number,
+): Pick<
+  CompassResult["influence"],
+  "publication" | "journalist" | "comparableCoverage" | "topicContext"
+> {
+  const counts = contextCounts(context);
+  const weighting = context.weighting;
+  const raw = {
+    publication: weighting?.publicationHistory ?? 0.65,
+    journalist: weighting?.journalistWork ?? 0.35,
+    comparableCoverage: 0,
+    topicContext: 0,
+  };
+  const available = (["publication", "journalist"] as const).filter((kind) => counts[kind] > 0);
+  const totalWeight = available.reduce((sum, kind) => sum + raw[kind], 0);
+  const totalCount = available.reduce((sum, kind) => sum + counts[kind], 0);
+  const denominator = totalWeight > 0 ? totalWeight : totalCount;
+  return {
+    publication:
+      contextWeight *
+      (denominator > 0
+        ? totalWeight > 0
+          ? raw.publication / denominator
+          : counts.publication / denominator
+        : 0),
+    journalist:
+      contextWeight *
+      (denominator > 0
+        ? totalWeight > 0
+          ? raw.journalist / denominator
+          : counts.journalist / denominator
+        : 0),
+    comparableCoverage: 0,
+    topicContext: 0,
+  };
+}
+
 const display: Record<CompassResult["label"], string> = {
   "far-left": "Far left",
   left: "Left",
@@ -132,49 +206,44 @@ export function projectCompassWithContext(
   context: PoliticalContextResult,
 ): CompassResult {
   const article = projectArticleCompass(index, plan);
-  if (context.status !== "ready" || context.signals.length === 0 || article.score === null) {
+  if (context.status !== "ready" || context.signals.length === 0) {
     return CompassResultSchema.parse({ ...article, context });
   }
-  const weightedContext = context.signals.reduce(
-    (total, signal) => total + signal.score * signal.strength * signal.relevance,
-    0,
+  const contextual = contextScore(context);
+  if (contextual.weight <= 0) return CompassResultSchema.parse({ ...article, context });
+  // Direct article signals anchor the placement, while verified publication
+  // history and journalist work share exactly the remaining half. Comparable
+  // coverage and topic context may explain a result, but cannot manufacture a
+  // political position. Context-only placement is allowed only from those two
+  // verified historical lanes and remains explicitly low confidence.
+  const hasArticle = article.score !== null;
+  const score = roundedScore(
+    hasArticle ? (article.score ?? 0) * 0.5 + contextual.score * 0.5 : contextual.score,
   );
-  const contextWeight = context.signals.reduce(
-    (total, signal) => total + signal.strength * signal.relevance,
-    0,
-  );
-  if (contextWeight <= 0) return CompassResultSchema.parse({ ...article, context });
-  const score =
-    Math.round(clamp(article.score * 0.6 + (weightedContext / contextWeight) * 0.4, -3, 3) * 100) /
-    100;
   const placement = label(score);
-  const counts = {
-    publication: context.signals.filter((signal) => signal.sourceKind === "publication-history")
-      .length,
-    journalist: context.signals.filter((signal) => signal.sourceKind === "journalist-work").length,
-    comparableCoverage: context.signals.filter(
-      (signal) => signal.sourceKind === "comparable-coverage",
-    ).length,
-    topicContext: context.signals.filter((signal) => signal.sourceKind === "topic-context").length,
-  };
-  const total = Math.max(1, context.signals.length);
+  const articleWeight = hasArticle ? 0.5 : 0;
+  const contextWeight = hasArticle ? 0.5 : 1;
+  const confidenceScore = hasArticle
+    ? Math.min(0.9, Math.round((article.confidenceScore * 0.7 + 0.16) * 100) / 100)
+    : Math.min(
+        0.44,
+        Math.round((0.22 + Math.min(0.12, context.signals.length * 0.04)) * 100) / 100,
+      );
   return CompassResultSchema.parse({
     ...article,
     label: placement,
     displayLabel: display[placement],
     score,
-    confidenceScore: Math.min(0.86, Math.round((article.confidenceScore * 0.7 + 0.16) * 100) / 100),
-    confidence:
-      article.confidenceScore >= 0.7 ? "high" : article.confidenceScore >= 0.42 ? "medium" : "low",
-    explanation: `${article.explanation} Bounded publication, journalist, comparable-coverage, and topic-context evidence shifted the contextual estimate cautiously toward ${display[placement].toLocaleLowerCase("en-US")}.`,
-    basis: "context-assisted",
+    confidenceScore,
+    confidence: confidenceScore >= 0.75 ? "high" : confidenceScore >= 0.45 ? "medium" : "low",
+    explanation: hasArticle
+      ? `${article.explanation} Verified publication history and journalist work shifted the contextual estimate cautiously toward ${display[placement].toLocaleLowerCase("en-US")}.`
+      : `The available publication-history and journalist-work research is closest to ${display[placement].toLocaleLowerCase("en-US")} on the political spectrum.`,
+    basis: hasArticle ? "context-assisted" : "context-led",
     context,
     influence: {
-      article: 0.6,
-      publication: (0.4 * counts.publication) / total,
-      journalist: (0.4 * counts.journalist) / total,
-      comparableCoverage: (0.4 * counts.comparableCoverage) / total,
-      topicContext: (0.4 * counts.topicContext) / total,
+      article: articleWeight,
+      ...contextInfluence(context, contextWeight),
     },
   });
 }

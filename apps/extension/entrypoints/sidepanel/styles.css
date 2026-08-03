@@ -32,6 +32,14 @@ body,
   min-height: 100dvh;
 }
 
+html {
+  scroll-padding-top: 84px;
+}
+
+:where(section[id], [role="tabpanel"], h1, h2, h3, a, button, input, select, textarea) {
+  scroll-margin-top: 84px;
+}
+
 body {
   min-width: 280px;
   min-height: 100dvh;
@@ -118,7 +126,7 @@ a:hover {
   min-height: 58px;
   align-items: center;
   justify-content: space-between;
-  margin: max(8px, env(safe-area-inset-top)) 18px 0;
+  margin: max(8px, env(safe-area-inset-top)) var(--masthead-margin, 18px) 0;
   padding: 9px 12px;
   border: 1px solid rgb(255 255 255 / 56%);
   border-radius: 16px;
@@ -138,8 +146,8 @@ a:hover {
 
 .brand-header.is-compact {
   min-height: 48px;
-  margin-right: 22px;
-  margin-left: 22px;
+  margin-right: var(--masthead-margin, 18px);
+  margin-left: var(--masthead-margin, 18px);
   padding: 5px 9px;
   border-radius: 14px;
   box-shadow:
@@ -197,9 +205,9 @@ a:hover {
 
 .brand-action {
   display: grid;
-  width: 40px;
-  height: 40px;
-  padding: 9px;
+  width: 44px;
+  height: 44px;
+  padding: 10px;
   border: 1px solid rgb(61 99 140 / 24%);
   border-radius: 999px;
   background: rgb(255 255 255 / 22%);
@@ -229,9 +237,9 @@ a:hover {
 }
 
 .brand-header.is-compact .brand-action {
-  width: 34px;
-  height: 34px;
-  padding: 8px;
+  width: 44px;
+  height: 44px;
+  padding: 10px;
 }
 
 .brand-action:hover {
@@ -243,6 +251,37 @@ a:hover {
 .brand-action svg {
   width: 100%;
   height: 100%;
+}
+
+.masthead-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  display: grid;
+  min-width: 170px;
+  padding: 6px;
+  border: 1px solid rgb(61 99 140 / 22%);
+  border-radius: 10px;
+  background: rgb(251 253 255 / 96%);
+  box-shadow: 0 12px 30px rgb(42 88 129 / 18%);
+  backdrop-filter: blur(14px);
+}
+
+.masthead-menu button {
+  min-height: 44px;
+  padding: 9px 11px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 0.76rem;
+  text-align: left;
+}
+
+.masthead-menu button:hover,
+.masthead-menu button:focus-visible {
+  background: rgb(225 239 254 / 72%);
 }
 
 .article-header {
@@ -288,6 +327,82 @@ a:hover {
   line-height: 1.4;
 }
 
+.preview-byline {
+  flex-wrap: wrap;
+}
+
+.analyze-screen,
+.running-main {
+  max-width: 520px;
+  margin: 0 auto;
+  padding: clamp(76px, 10vh, 108px) 30px 52px;
+}
+
+.analyze-screen h1,
+.running-main h1 {
+  max-width: 500px;
+  margin: 16px 0 0;
+  color: var(--ink);
+  font-family: var(--font-serif);
+  font-size: clamp(2.15rem, 9.5vw, 3.45rem);
+  font-weight: 400;
+  letter-spacing: -0.055em;
+  line-height: 0.98;
+  text-wrap: balance;
+}
+
+.analyze-lede,
+.running-lede,
+.running-article-title {
+  max-width: 430px;
+  margin: 22px 0 0;
+  color: var(--body);
+  font-size: 0.9rem;
+  line-height: 1.58;
+}
+
+.running-article-title {
+  margin-top: 18px;
+  color: var(--muted);
+  font-family: var(--font-serif);
+  font-size: 1.08rem;
+}
+
+.analyze-boundary {
+  display: grid;
+  max-width: 420px;
+  margin: 28px 0 0;
+  padding: 13px 14px;
+  border-left: 2px solid var(--gold);
+  background: rgb(255 255 255 / 36%);
+  color: var(--body);
+  gap: 4px;
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.analyze-disabled-reason {
+  margin: 14px 0 0;
+  color: #9a3126;
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
+.analyze-boundary strong {
+  color: var(--ink);
+  font-size: 0.78rem;
+}
+
+.analyze-action {
+  min-width: 190px;
+  margin-top: 27px;
+}
+
+.running-main .analysis-progress {
+  margin-top: 34px;
+  padding: 0;
+}
+
 .intro-loading {
   min-height: 102px;
 }
@@ -307,22 +422,56 @@ a:hover {
 }
 
 .analysis-progress {
-  display: grid;
   max-width: 520px;
-  align-items: center;
-  grid-template-columns: auto minmax(0, 1fr);
-  column-gap: 12px;
-  row-gap: 8px;
   margin: -2px auto 28px;
   padding: 0 28px;
 }
 
-.analysis-progress-dot {
-  width: 11px;
-  height: 11px;
-  align-self: start;
-  margin-top: 4px;
+.analysis-progress-timeline {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  gap: 0;
+}
+
+.analysis-progress-step {
+  position: relative;
+  display: grid;
+  min-height: 58px;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 13px;
+}
+
+.analysis-progress-step:not(:last-child)::after {
+  position: absolute;
+  top: 21px;
+  bottom: -4px;
+  left: 6px;
+  width: 1px;
+  background: rgb(72 109 148 / 24%);
+  content: "";
+}
+
+.analysis-progress-marker {
+  position: relative;
+  z-index: 1;
+  width: 13px;
+  height: 13px;
+  margin-top: 3px;
+  border: 1px solid rgb(72 109 148 / 45%);
   border-radius: 999px;
+  background: rgb(244 248 252 / 92%);
+}
+
+.analysis-progress-step-complete .analysis-progress-marker {
+  border-color: var(--gold);
+  background: var(--gold);
+  box-shadow: inset 0 0 0 3px rgb(255 255 255 / 80%);
+}
+
+.analysis-progress-step-active .analysis-progress-marker {
+  border-color: var(--gold);
   background: var(--gold);
   box-shadow: 0 0 0 6px rgb(212 155 8 / 10%);
   animation: progress-dot 1.8s ease-out infinite;
@@ -341,7 +490,7 @@ a:hover {
 
 .analysis-progress-copy strong {
   color: var(--ink);
-  font-size: 0.84rem;
+  font-size: 0.78rem;
   font-weight: 600;
 }
 
@@ -353,41 +502,41 @@ a:hover {
   letter-spacing: 0.02em;
 }
 
-.analysis-progress-track {
-  display: block;
-  grid-column: 2;
-  height: 1px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: rgb(72 109 148 / 20%);
+.analysis-progress-step-waiting .analysis-progress-copy {
+  opacity: 0.52;
 }
 
-.analysis-progress-track > span {
-  display: block;
-  width: 100%;
-  height: 100%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, #d49b08, #efbd4d);
-  transform-origin: left center;
+.analysis-progress-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule);
+  gap: 16px;
 }
 
-.analysis-progress-indicator {
-  transform: scaleX(0.34);
+.analysis-progress-elapsed {
+  color: var(--muted);
+  font-size: 0.62rem;
+  letter-spacing: 0.03em;
 }
 
 .analysis-progress-cancel {
-  grid-column: 2;
-  justify-self: start;
-  padding: 2px 0;
-  border: 0;
-  border-bottom: 1px solid currentcolor;
-  background: transparent;
-  color: var(--muted);
+  min-height: 44px;
+  padding: 8px 15px;
+  border: 1px solid rgb(72 109 148 / 38%);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 50%);
+  color: var(--body);
   cursor: pointer;
-  font-size: 0.63rem;
+  font-size: 0.66rem;
+  font-weight: 650;
 }
 
 .analysis-progress-cancel:hover {
+  border-color: rgb(72 109 148 / 65%);
+  background: rgb(255 255 255 / 72%);
   color: var(--ink);
 }
 
@@ -858,6 +1007,61 @@ blockquote footer {
   margin-left: 0;
 }
 
+.footnote-marker {
+  margin-left: 2px;
+  vertical-align: super;
+  font-family: var(--font-sans);
+  font-size: 0.62em;
+  line-height: 0;
+}
+
+.footnote-marker a {
+  padding: 0 2px;
+  color: var(--blue);
+  text-decoration: none;
+}
+
+.footnote-marker a:hover {
+  text-decoration: underline;
+}
+
+.section-footnotes {
+  margin-top: 17px;
+  padding-top: 12px;
+  border-top: 1px solid rgb(72 109 148 / 17%);
+}
+
+.section-footnotes h3 {
+  margin: 0 0 7px;
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.section-footnotes ol {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.section-footnotes li {
+  padding-left: 2px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.45;
+}
+
+.section-footnotes li a {
+  color: #315f8f;
+}
+
+.section-footnotes li small {
+  font-size: inherit;
+}
+
 .key-source-note {
   display: block;
   margin-top: 5px;
@@ -879,6 +1083,25 @@ blockquote footer {
 .section-error,
 .page-error {
   color: #9c312b;
+}
+
+.section-error p {
+  margin: 0 0 10px;
+}
+
+.section-retry {
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid currentcolor;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.72rem;
+}
+
+.compass-retry {
+  margin: 10px 0 0 48px;
 }
 
 .source-result {
@@ -937,6 +1160,7 @@ blockquote footer {
 
 .copy-logs-button {
   min-width: 112px;
+  min-height: 44px;
   padding: 8px 14px;
   border: 1px solid rgb(72 109 148 / 34%);
   border-radius: 999px;
@@ -966,6 +1190,7 @@ blockquote footer {
 }
 
 .clear-logs-button {
+  min-height: 44px;
   margin-top: 9px;
   padding: 2px 0;
   border: 0;
@@ -1034,6 +1259,7 @@ blockquote footer {
 }
 
 .page-error button {
+  min-height: 44px;
   padding: 8px 12px;
   border: 1px solid #a64943;
   border-radius: 4px;
@@ -1064,6 +1290,7 @@ blockquote footer {
 }
 
 .page-notice button {
+  min-height: 44px;
   padding: 8px 12px;
   border: 1px solid rgb(72 109 148 / 34%);
   border-radius: 4px;
@@ -1388,6 +1615,7 @@ blockquote footer {
 
 .provider-options button {
   display: grid;
+  min-height: 44px;
   padding: 16px;
   border: 1px solid rgb(67 103 142 / 24%);
   border-radius: 9px;
@@ -1480,7 +1708,7 @@ blockquote footer {
 }
 
 .settings-provider-key .provider-remove-key {
-  min-height: 36px;
+  min-height: 44px;
   grid-column: 1 / -1;
   justify-self: start;
   border-color: rgb(162 57 44 / 38%);
@@ -1488,12 +1716,74 @@ blockquote footer {
 }
 
 .settings-layer {
-  position: fixed;
-  z-index: var(--z-modal);
-  inset: 0;
-  overflow-y: auto;
+  position: relative;
+  min-height: 100dvh;
   background: transparent;
   animation: settings-enter 180ms ease-out both;
+}
+
+.advanced-settings-disclosure {
+  margin-top: 20px;
+  border-top: 1px solid var(--rule);
+}
+
+.advanced-settings-disclosure > summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 15px 0 10px;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.settings-custom-label {
+  margin-inline-start: auto;
+  color: var(--blue-700);
+  font-family: var(--font-sans);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.settings-lock-note {
+  margin-top: 10px;
+}
+
+.about-team {
+  margin-top: 28px;
+  padding-top: 20px;
+  border-top: 1px solid var(--rule);
+}
+
+.about-team h2 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.68rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.about-team ul {
+  display: grid;
+  margin: 14px 0 0;
+  padding: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 18px;
+  color: var(--body);
+  font-size: 0.72rem;
+  list-style: none;
+}
+
+.depth-control:disabled,
+.preference-section :disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
 }
 
 .settings-main {
@@ -1518,9 +1808,136 @@ blockquote footer {
   line-height: 1.55;
 }
 
+.settings-tabs {
+  display: grid;
+  margin: 22px 0 0;
+  border-bottom: 1px solid var(--rule);
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.settings-tabs button {
+  min-height: 44px;
+  padding: 9px 6px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 650;
+}
+
+.settings-tabs button.selected {
+  border-bottom-color: var(--blue);
+  color: var(--ink);
+}
+
+.settings-tabs button:hover {
+  color: var(--ink);
+}
+
+[role="tabpanel"] {
+  outline: none;
+}
+
+.depth-control {
+  margin: 0;
+  padding: 26px 0 25px;
+  border: 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.depth-control .preference-label {
+  padding: 0;
+}
+
+.depth-slider {
+  width: 100%;
+  height: 44px;
+  margin: 0;
+  accent-color: var(--blue);
+  cursor: pointer;
+}
+
+.depth-scale {
+  display: grid;
+  color: var(--muted);
+  font-size: 0.63rem;
+  grid-template-columns: repeat(4, 1fr);
+  text-align: center;
+}
+
+.depth-scale span:first-child {
+  text-align: left;
+}
+
+.depth-scale span:last-child {
+  text-align: right;
+}
+
+.depth-control-compact {
+  max-width: 430px;
+  padding: 25px 0 0;
+  border-bottom: 0;
+}
+
+.diagnostics-actions {
+  display: grid;
+  max-width: 420px;
+  margin-top: 28px;
+  gap: 10px;
+}
+
+.diagnostics-actions .chatgpt-action {
+  width: fit-content;
+  min-width: 150px;
+}
+
+.diagnostics-actions .settings-saved {
+  min-height: 1.2em;
+  margin: 0;
+}
+
+.manual-log-textarea {
+  width: 100%;
+  min-height: 210px;
+  padding: 11px 12px;
+  border: 1px solid rgb(72 109 148 / 34%);
+  border-radius: 8px;
+  background: rgb(255 255 255 / 64%);
+  color: #183a60;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.58rem;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.settings-secondary-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: 21px 0 0;
+}
+
+.settings-secondary-nav button {
+  min-height: 44px;
+  padding: 4px 0;
+  border: 0;
+  border-bottom: 1px solid currentcolor;
+  background: transparent;
+  color: #315578;
+  cursor: pointer;
+  font-size: 0.72rem;
+}
+
 .preference-section {
   padding: 26px 0 25px;
   border-bottom: 1px solid var(--rule);
+}
+
+.preference-section > button {
+  min-height: 44px;
+  padding: 8px 12px;
 }
 
 .preference-label {
@@ -1573,6 +1990,10 @@ blockquote footer {
   border: 1px solid rgb(67 103 142 / 32%);
   border-radius: 6px;
   grid-template-columns: repeat(3, 1fr);
+}
+
+.analysis-mode-control {
+  grid-template-columns: repeat(4, 1fr);
 }
 
 .reasoning-control button {
@@ -1745,9 +2166,13 @@ blockquote footer {
 }
 
 @media (max-width: 330px) {
+  :root {
+    --masthead-margin: 12px;
+  }
+
   .brand-header {
-    margin-right: 12px;
-    margin-left: 12px;
+    margin-right: var(--masthead-margin);
+    margin-left: var(--masthead-margin);
   }
 
   .article-header {
@@ -1757,9 +2182,28 @@ blockquote footer {
 
   .report-main,
   .connection-main,
-  .settings-main {
+  .settings-main,
+  .analyze-screen,
+  .running-main {
     padding-right: 20px;
     padding-left: 20px;
+  }
+
+  .analyze-screen h1,
+  .running-main h1 {
+    font-size: clamp(2.3rem, 13vw, 3rem);
+  }
+
+  .reasoning-control {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .settings-provider-key {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-provider-key button {
+    width: 100%;
   }
 
   .brand-wordmark {

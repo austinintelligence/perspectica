@@ -233,10 +233,17 @@ function deterministicPlan(
     );
   }
   if (claims.length > 0) {
+    const verificationClaims = claims
+      .filter((claim) =>
+        claim.paragraphIds.some((paragraphId) => index.paragraphs[paragraphId]?.kind !== "quote"),
+      )
+      .slice(0, 3);
     missions.push(
       mission(
         "mission-verify",
-        claims.slice(0, 3).map((claim) => claim.id),
+        (verificationClaims.length > 0 ? verificationClaims : claims.slice(0, 3)).map(
+          (claim) => claim.id,
+        ),
         "independent-verification",
         claims
           .slice(0, 3)
@@ -336,6 +343,14 @@ function deterministicPlan(
       reason: "Article links are always projected as works cited.",
     },
   } as const;
+  const orderedMissions = missions.sort((left, right) => right.priority - left.priority);
+  const boundedMissions =
+    budget.maxMissions === 1
+      ? [
+          orderedMissions.find((mission) => mission.purpose === "independent-verification") ??
+            orderedMissions[0],
+        ].filter((mission): mission is ResearchMission => Boolean(mission))
+      : orderedMissions.slice(0, budget.maxMissions);
   const plan: AnalysisPlan = {
     id: createId(),
     overview: compact(
@@ -344,9 +359,7 @@ function deterministicPlan(
     ),
     claims,
     articleSignals: signals,
-    missions: missions
-      .sort((left, right) => right.priority - left.priority)
-      .slice(0, budget.maxMissions),
+    missions: boundedMissions,
     applicability,
     unresolvedQuestions: claims
       .slice(0, 4)
@@ -423,7 +436,7 @@ export async function createAnalysisPlan(
   fallback.contextCharacters = context.characters;
   if (!options.model) return AnalysisPlanSchema.parse(fallback);
   const prompt = buildLensPrompt(index, context, budget);
-  options.onUsage?.({ phase: "lens", inputCharacters: prompt.length, outputCharacters: 0 });
+  let usageReported = false;
   try {
     const result = streamText({
       model: options.model,
@@ -434,13 +447,15 @@ export async function createAnalysisPlan(
       maxOutputTokens: budget.modelOutputTokens,
       maxRetries: 1,
       timeout: {
-        totalMs: Math.min(45_000, budget.totalDeadlineMs),
-        firstChunkMs: 30_000,
-        chunkMs: 15_000,
+        // The selected research depth owns the real deadline. Do not turn the
+        // 30-second UX target into a stream-chunk timeout: reasoning models can
+        // remain quiet while still making useful progress.
+        totalMs: Math.min(budget.specialistTimeoutMs, budget.totalDeadlineMs),
       },
     });
     for await (const _ of result.partialOutputStream) options.signal?.throwIfAborted();
     const plan = AnalysisPlanSchema.parse(await result.output);
+    usageReported = true;
     options.onUsage?.({
       phase: "lens",
       inputCharacters: prompt.length,
@@ -448,6 +463,9 @@ export async function createAnalysisPlan(
     });
     return normalizePlan(plan, index, budget, fallback);
   } catch {
+    if (!usageReported) {
+      options.onUsage?.({ phase: "lens", inputCharacters: prompt.length, outputCharacters: 0 });
+    }
     // A deterministic plan is a valid bounded fallback. Retrieval is never
     // replaced by a section-wide legacy dossier after this point.
     return fallback;

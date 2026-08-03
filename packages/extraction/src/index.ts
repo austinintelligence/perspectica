@@ -16,7 +16,7 @@ import { buildArticleIndex } from "./article-index";
 export { buildArticleIndex } from "./article-index";
 export type { ArticleIndex } from "@perspectica/contracts/article";
 
-export const EXTRACTOR_VERSION = "dom-v5";
+export const EXTRACTOR_VERSION = "dom-v6";
 
 export class ArticleExtractionError extends Error {
   readonly code = "NOT_ARTICLE";
@@ -28,10 +28,63 @@ export class ArticleExtractionError extends Error {
 }
 
 const excludedAncestorSelector =
-  "nav, footer, aside, form, dialog, [aria-hidden='true'], [hidden], .advertisement, .ad, .promo, .newsletter, .comments, [class*='newsletter'], [class*='promo'], [data-component*='newsletter'], [data-component*='promo'], [data-testid*='newsletter']";
+  "nav, footer, aside, form, dialog, [aria-hidden='true'], [hidden], [inert], template, noscript, .advertisement, .ad, .promo, .newsletter, .comments, [class*='newsletter'], [class*='promo'], [data-component*='newsletter'], [data-component*='promo'], [data-testid*='newsletter']";
+
+const MAX_JSON_LD_SCRIPTS = 24;
+const MAX_JSON_LD_CHARS = 128_000;
+const MAX_JSON_LD_DEPTH = 24;
+const MAX_JSON_LD_NODES = 2_000;
 
 function cleanText(value: string | null | undefined): string {
   return (value ?? "").replace(/\s+/g, " ").trim();
+}
+
+/** Page HTML is untrusted input, so ignore content readers cannot see. */
+function isVisibleContent(element: Element): boolean {
+  if (element.closest(excludedAncestorSelector)) return false;
+  const ownStyle = element.getAttribute("style")?.toLocaleLowerCase("en-US") ?? "";
+  if (/display\s*:\s*none|visibility\s*:\s*hidden/.test(ownStyle)) return false;
+  try {
+    const style = window.getComputedStyle?.(element);
+    return style?.display !== "none" && style?.visibility !== "hidden";
+  } catch {
+    return true;
+  }
+}
+
+function parseBoundedJsonLd(value: string): unknown | null {
+  if (!value || value.length > MAX_JSON_LD_CHARS) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function visitBoundedJson(
+  value: unknown,
+  visitor: (record: Record<string, unknown>) => boolean | void,
+): boolean {
+  const stack: Array<{ value: unknown; depth: number }> = [{ value, depth: 0 }];
+  let nodes = 0;
+  while (stack.length > 0 && nodes < MAX_JSON_LD_NODES) {
+    const current = stack.pop();
+    if (!current || current.depth > MAX_JSON_LD_DEPTH) continue;
+    nodes += 1;
+    if (Array.isArray(current.value)) {
+      for (const child of current.value.slice(0, MAX_JSON_LD_NODES - nodes)) {
+        stack.push({ value: child, depth: current.depth + 1 });
+      }
+      continue;
+    }
+    if (!current.value || typeof current.value !== "object") continue;
+    const record = current.value as Record<string, unknown>;
+    if (visitor(record) === true) return true;
+    if (record["@graph"] !== undefined) {
+      stack.push({ value: record["@graph"], depth: current.depth + 1 });
+    }
+  }
+  return false;
 }
 
 function firstMeta(document: Document, selectors: string[]): string | null {
@@ -76,17 +129,15 @@ function cleanAuthorCandidate(
 
 function jsonLdAuthors(document: Document, publication: string | null): string[] {
   const authors: string[] = [];
-
-  const visit = (value: unknown): void => {
-    if (Array.isArray(value)) {
-      value.forEach(visit);
-      return;
-    }
-    if (!value || typeof value !== "object") return;
-
-    const record = value as Record<string, unknown>;
-    const type = Array.isArray(record["@type"]) ? record["@type"] : [record["@type"]];
-    if (type.some((entry) => entry === "NewsArticle" || entry === "Article")) {
+  const scripts = [
+    ...document.querySelectorAll<HTMLScriptElement>("script[type='application/ld+json']"),
+  ].slice(0, MAX_JSON_LD_SCRIPTS);
+  for (const script of scripts) {
+    const parsed = parseBoundedJsonLd(script.textContent ?? "");
+    if (!parsed) continue;
+    visitBoundedJson(parsed, (record) => {
+      const type = Array.isArray(record["@type"]) ? record["@type"] : [record["@type"]];
+      if (!type.some((entry) => entry === "NewsArticle" || entry === "Article")) return;
       const authorValues = Array.isArray(record.author) ? record.author : [record.author];
       for (const author of authorValues) {
         const name =
@@ -98,19 +149,7 @@ function jsonLdAuthors(document: Document, publication: string | null): string[]
         const cleaned = cleanAuthorCandidate(typeof name === "string" ? name : null, publication);
         if (cleaned) authors.push(cleaned);
       }
-    }
-
-    if (record["@graph"]) visit(record["@graph"]);
-  };
-
-  for (const script of document.querySelectorAll<HTMLScriptElement>(
-    "script[type='application/ld+json']",
-  )) {
-    try {
-      visit(JSON.parse(script.textContent ?? ""));
-    } catch {
-      // Ignore malformed structured data and continue with visible metadata.
-    }
+    });
   }
 
   return [...new Set(authors)];
@@ -123,13 +162,20 @@ function toIsoDate(value: string | null): string | null {
 }
 
 function getCanonicalUrl(document: Document, fallbackUrl: string): string {
+  const actualUrl = normalizeCanonicalUrl(fallbackUrl);
+  if (!actualUrl) {
+    throw new ArticleExtractionError("The current page does not have a valid web URL.");
+  }
   const canonical = document.querySelector<HTMLLinkElement>("link[rel='canonical']")?.href;
   const socialUrl = firstMeta(document, ["meta[property='og:url']"]);
-  for (const candidate of [canonical, socialUrl, fallbackUrl]) {
-    const normalized = normalizeCanonicalUrl(candidate ?? fallbackUrl, fallbackUrl);
-    if (normalized) return normalized;
+  const actualOrigin = new URL(actualUrl).origin;
+  for (const candidate of [canonical, socialUrl]) {
+    const normalized = normalizeCanonicalUrl(candidate ?? "", actualUrl);
+    // Page metadata is untrusted. A cross-origin canonical must never replace
+    // the identity of the tab the user explicitly asked us to analyze.
+    if (normalized && new URL(normalized).origin === actualOrigin) return normalized;
   }
-  throw new ArticleExtractionError("The current page does not have a valid web URL.");
+  return actualUrl;
 }
 
 type ArticleRoot = {
@@ -138,24 +184,18 @@ type ArticleRoot = {
 };
 
 function hasStructuredArticleData(document: Document): boolean {
-  const visit = (value: unknown): boolean => {
-    if (Array.isArray(value)) return value.some(visit);
-    if (!value || typeof value !== "object") return false;
-    const record = value as Record<string, unknown>;
-    const types = Array.isArray(record["@type"]) ? record["@type"] : [record["@type"]];
-    if (types.some((entry) => entry === "NewsArticle" || entry === "Article")) return true;
-    return record["@graph"] !== undefined && visit(record["@graph"]);
-  };
-
-  return [
-    ...document.querySelectorAll<HTMLScriptElement>("script[type='application/ld+json']"),
-  ].some((script) => {
-    try {
-      return visit(JSON.parse(script.textContent ?? ""));
-    } catch {
-      return false;
-    }
-  });
+  return [...document.querySelectorAll<HTMLScriptElement>("script[type='application/ld+json']")]
+    .slice(0, MAX_JSON_LD_SCRIPTS)
+    .some((script) => {
+      const parsed = parseBoundedJsonLd(script.textContent ?? "");
+      return (
+        parsed !== null &&
+        visitBoundedJson(parsed, (record) => {
+          const types = Array.isArray(record["@type"]) ? record["@type"] : [record["@type"]];
+          return types.some((entry) => entry === "NewsArticle" || entry === "Article");
+        })
+      );
+    });
 }
 
 function hasArticleMetadata(document: Document): boolean {
@@ -186,7 +226,7 @@ function chooseArticleRoot(document: Document, canonicalUrl: string): ArticleRoo
   const scored = candidates
     .map((element) => {
       const paragraphs = [...element.querySelectorAll("p")].filter(
-        (paragraph) => cleanText(paragraph.textContent).length >= 40,
+        (paragraph) => isVisibleContent(paragraph) && cleanText(paragraph.textContent).length >= 40,
       );
       const textLength = paragraphs.reduce(
         (total, paragraph) => total + cleanText(paragraph.textContent).length,
@@ -236,7 +276,7 @@ function chooseArticleRoot(document: Document, canonicalUrl: string): ArticleRoo
   // metadata distinguishes it from a generic page shell.
   const body = document.body ?? document.documentElement;
   const bodyParagraphs = [...body.querySelectorAll("p")].filter(
-    (paragraph) => cleanText(paragraph.textContent).length >= 40,
+    (paragraph) => isVisibleContent(paragraph) && cleanText(paragraph.textContent).length >= 40,
   );
   if (metadata && !genericPath && bodyParagraphs.length > 0) {
     return { element: body, status: "article" };
@@ -316,7 +356,7 @@ function extractParagraphs(root: Element): {
   let truncated = false;
 
   for (const element of elements) {
-    if (element.closest(excludedAncestorSelector)) continue;
+    if (!isVisibleContent(element)) continue;
     const originalText = cleanText(element.textContent);
     const tagName = element.tagName.toLocaleLowerCase("en-US");
     const kind =
@@ -384,7 +424,7 @@ function extractLinks(
 
   for (const anchor of root.querySelectorAll<HTMLAnchorElement>("a[href]")) {
     if (links.length >= ARTICLE_MAX_LINKS) break;
-    if (anchor.closest(excludedAncestorSelector)) continue;
+    if (!isVisibleContent(anchor)) continue;
     const normalized = normalizeCanonicalUrl(anchor.href, canonicalUrl);
     if (!normalized || normalized === canonicalUrl || seen.has(normalized)) continue;
     seen.add(normalized);

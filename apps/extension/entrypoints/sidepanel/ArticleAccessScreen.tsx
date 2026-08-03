@@ -32,7 +32,9 @@ export function ArticleAccessScreen({ onReady, onOpenSettings }: ArticleAccessSc
       <BrandHeader action="menu" actionLabel="Open preferences" onAction={onOpenSettings} />
       <main className="connection-main">
         <p className="eyebrow">Page access</p>
-        <h1>Analyze any article</h1>
+        <h1 data-route-heading tabIndex={-1}>
+          Analyze any article
+        </h1>
         <p className="connection-lede">
           Allow Perspectica to read the article you choose to analyze.
         </p>

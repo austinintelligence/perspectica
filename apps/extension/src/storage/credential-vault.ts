@@ -34,7 +34,9 @@ const ExaCredentialSchema = z.object({
 });
 export type ExaCredential = z.infer<typeof ExaCredentialSchema>;
 
-export type VaultPurpose = "chatgpt" | "exa";
+const AnalysisHistorySchema = z.array(z.unknown()).max(10);
+
+export type VaultPurpose = "chatgpt" | "exa" | "analysis" | "analysis-resume";
 
 export class MissingVaultKeyError extends Error {
   constructor() {
@@ -179,7 +181,26 @@ export class CredentialVault {
   }
 
   async clear(): Promise<void> {
-    await Promise.all([this.remove("chatgpt"), this.remove("exa")]);
+    await Promise.all([
+      this.remove("chatgpt"),
+      this.remove("exa"),
+      this.remove("analysis"),
+      this.remove("analysis-resume"),
+    ]);
     await this.keyStore.remove(KEY_ID);
+  }
+
+  /** Encrypted local report retention, kept generic to avoid a runtime cycle. */
+  async readAnalysisHistory<T>(): Promise<T[] | undefined> {
+    const value = await this.read("analysis", AnalysisHistorySchema);
+    return value as T[] | undefined;
+  }
+
+  async writeAnalysisHistory<T>(value: T[]): Promise<void> {
+    await this.write("analysis", AnalysisHistorySchema.parse(value));
+  }
+
+  async removeAnalysisHistory(): Promise<void> {
+    await this.remove("analysis");
   }
 }

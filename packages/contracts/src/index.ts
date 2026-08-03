@@ -171,7 +171,7 @@ export type SourceCitationKind = z.infer<typeof SourceCitationKindSchema>;
  * source validation so discarded evidence cannot affect the final score.
  */
 export const PoliticalContextWeightingSchema = z.object({
-  articleWeight: z.number().min(0.4).max(0.6),
+  articleWeight: z.number().min(0.5).max(0.6),
   publicationHistory: z.number().min(0).max(1),
   journalistWork: z.number().min(0).max(1),
   comparableCoverage: z.number().min(0).max(1),
@@ -468,6 +468,117 @@ export const SourceListResultSchema = z.object({
 });
 export type SourceListResult = z.infer<typeof SourceListResultSchema>;
 
+export const AnalysisModelSchema = z.enum(["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.4"]);
+export type AnalysisModel = z.infer<typeof AnalysisModelSchema>;
+
+export const AnalysisReasoningEffortSchema = z.enum(["low", "medium", "high"]);
+export type AnalysisReasoningEffort = z.infer<typeof AnalysisReasoningEffortSchema>;
+
+/** Bounded research depth with an overridable recommended inference profile. */
+export const ResearchDepthSchema = z.enum(["quick", "balanced", "deep", "verified"]);
+export type ResearchDepth = z.infer<typeof ResearchDepthSchema>;
+
+/**
+ * The depth table is intentionally explicit. Consumers should not infer
+ * provider, model, or deadline behavior from a display label.
+ */
+export const ResearchProfileSchema = z.object({
+  depth: ResearchDepthSchema,
+  defaultModel: AnalysisModelSchema,
+  defaultReasoningEffort: AnalysisReasoningEffortSchema,
+  maxMissions: z.number().int().positive().max(12),
+  maxSources: z.number().int().positive().max(24),
+  maxSearchQueries: z.number().int().nonnegative().max(24),
+  maxSearchResults: z.number().int().nonnegative().max(100),
+  maxSourceReads: z.number().int().nonnegative().max(24),
+  maxModelSteps: z.number().int().positive().max(12),
+  maxOutputTokens: z.number().int().positive().max(6_000),
+  maxArticleContextChars: z.number().int().positive().max(60_000),
+  maxSourceContextChars: z.number().int().positive().max(20_000),
+  specialistTimeoutMs: z.number().int().positive().max(600_000),
+  softTargetMs: z.number().int().positive().max(120_000),
+  hardCeilingMs: z.number().int().positive().max(600_000),
+});
+export type ResearchProfile = z.infer<typeof ResearchProfileSchema>;
+
+export const RESEARCH_PROFILES: Readonly<Record<ResearchDepth, ResearchProfile>> = {
+  quick: {
+    depth: "quick",
+    defaultModel: "gpt-5.4",
+    defaultReasoningEffort: "low",
+    maxMissions: 1,
+    maxSources: 2,
+    maxSearchQueries: 4,
+    maxSearchResults: 12,
+    maxSourceReads: 4,
+    maxModelSteps: 2,
+    maxOutputTokens: 1_600,
+    maxArticleContextChars: 24_000,
+    maxSourceContextChars: 6_000,
+    specialistTimeoutMs: 90_000,
+    softTargetMs: 15_000,
+    hardCeilingMs: 90_000,
+  },
+  balanced: {
+    depth: "balanced",
+    defaultModel: "gpt-5.6-luna",
+    defaultReasoningEffort: "medium",
+    maxMissions: 3,
+    maxSources: 5,
+    maxSearchQueries: 8,
+    maxSearchResults: 24,
+    maxSourceReads: 8,
+    maxModelSteps: 3,
+    maxOutputTokens: 2_400,
+    maxArticleContextChars: 48_000,
+    maxSourceContextChars: 10_000,
+    specialistTimeoutMs: 180_000,
+    softTargetMs: 30_000,
+    hardCeilingMs: 180_000,
+  },
+  deep: {
+    depth: "deep",
+    defaultModel: "gpt-5.6-luna",
+    defaultReasoningEffort: "high",
+    maxMissions: 5,
+    maxSources: 8,
+    maxSearchQueries: 12,
+    maxSearchResults: 40,
+    maxSourceReads: 12,
+    maxModelSteps: 5,
+    maxOutputTokens: 3_200,
+    maxArticleContextChars: 48_000,
+    maxSourceContextChars: 14_000,
+    specialistTimeoutMs: 360_000,
+    softTargetMs: 60_000,
+    hardCeilingMs: 360_000,
+  },
+  verified: {
+    depth: "verified",
+    defaultModel: "gpt-5.6-sol",
+    defaultReasoningEffort: "high",
+    maxMissions: 8,
+    maxSources: 12,
+    maxSearchQueries: 18,
+    maxSearchResults: 60,
+    maxSourceReads: 16,
+    maxModelSteps: 6,
+    maxOutputTokens: 4_000,
+    maxArticleContextChars: 48_000,
+    maxSourceContextChars: 18_000,
+    specialistTimeoutMs: 600_000,
+    softTargetMs: 120_000,
+    hardCeilingMs: 600_000,
+  },
+};
+
+export function researchProfileFor(depth: ResearchDepth = "balanced"): ResearchProfile {
+  return RESEARCH_PROFILES[depth];
+}
+
+export const RESEARCH_DEPTH_PROFILES = RESEARCH_PROFILES;
+export const getResearchProfile = researchProfileFor;
+
 export const AnalysisMetadataSchema = z.object({
   analysisId: requiredText,
   articleFingerprint: requiredText,
@@ -478,18 +589,14 @@ export const AnalysisMetadataSchema = z.object({
   reasoningEffort: z.enum(["none", "low", "medium", "high", "xhigh", "max"]),
   startedAt: z.string().datetime({ offset: true }),
   contentType: ContentTypeSchema,
+  researchDepth: ResearchDepthSchema.optional(),
 });
 export type AnalysisMetadata = z.infer<typeof AnalysisMetadataSchema>;
-
-export const AnalysisModelSchema = z.enum(["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.4"]);
-export type AnalysisModel = z.infer<typeof AnalysisModelSchema>;
-
-export const AnalysisReasoningEffortSchema = z.enum(["low", "medium", "high"]);
-export type AnalysisReasoningEffort = z.infer<typeof AnalysisReasoningEffortSchema>;
 
 export const AnalysisPreferencesSchema = z.object({
   model: AnalysisModelSchema,
   reasoningEffort: AnalysisReasoningEffortSchema,
+  depth: ResearchDepthSchema.optional(),
 });
 export type AnalysisPreferences = z.infer<typeof AnalysisPreferencesSchema>;
 

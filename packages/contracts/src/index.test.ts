@@ -3,8 +3,12 @@ import {
   ARTICLE_MAX_CONTENT_CHARS,
   ArticleDocumentSchema,
   ExternalSourceSchema,
+  RESEARCH_PROFILES,
+  ResearchDepthSchema,
   normalizeCanonicalUrl,
 } from "./index";
+import { EvidenceProviderSchema } from "./evidence";
+import { ANALYSIS_LIMITS } from "./limits";
 
 const baseArticle = {
   fingerprint: "fixture",
@@ -150,5 +154,37 @@ describe("ExternalSourceSchema", () => {
         excerpt: "Model-generated text must not look like a source quotation.",
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("V2 research depth and providers", () => {
+  it("exposes the four bounded depth profiles", () => {
+    expect(ResearchDepthSchema.options).toEqual(["quick", "balanced", "deep", "verified"]);
+    expect(RESEARCH_PROFILES.quick.maxModelSteps).toBe(2);
+    expect(RESEARCH_PROFILES.quick.defaultModel).toBe("gpt-5.4");
+    expect(RESEARCH_PROFILES.balanced.defaultReasoningEffort).toBe("medium");
+    expect(RESEARCH_PROFILES.deep.maxMissions).toBe(5);
+    expect(RESEARCH_PROFILES.verified.maxOutputTokens).toBe(4_000);
+    expect(RESEARCH_PROFILES.verified.specialistTimeoutMs).toBe(600_000);
+    expect(RESEARCH_PROFILES.verified.hardCeilingMs).toBe(600_000);
+    expect(
+      (["quick", "balanced", "deep", "verified"] as const).map((depth) => [
+        ANALYSIS_LIMITS[depth].maxMissions,
+        ANALYSIS_LIMITS[depth].maxSources,
+        ANALYSIS_LIMITS[depth].maxModelSteps,
+        ANALYSIS_LIMITS[depth].totalDeadlineMs,
+      ]),
+    ).toEqual([
+      [1, 2, 2, 90_000],
+      [3, 5, 3, 180_000],
+      [5, 8, 5, 360_000],
+      [8, 12, 6, 600_000],
+    ]);
+  });
+
+  it("accepts all canonical evidence providers", () => {
+    for (const provider of ["free", "chatgpt", "exa"] as const) {
+      expect(EvidenceProviderSchema.parse(provider)).toBe(provider);
+    }
   });
 });

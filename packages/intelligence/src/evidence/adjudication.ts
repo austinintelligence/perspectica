@@ -91,11 +91,9 @@ export function createModelEvidenceAdjudicator(
         system: SYSTEM_PROMPT,
         prompt,
         maxRetries: 1,
-        maxOutputTokens: Math.min(3_200, Math.max(1_200, input.budget.modelOutputTokens)),
+        maxOutputTokens: input.budget.modelOutputTokens,
         timeout: {
-          totalMs: Math.min(45_000, input.budget.totalDeadlineMs),
-          firstChunkMs: 30_000,
-          chunkMs: 15_000,
+          totalMs: Math.min(input.budget.specialistTimeoutMs, input.budget.totalDeadlineMs),
         },
       });
       const decisions = result.output?.decisions ?? [];
@@ -109,19 +107,40 @@ export function createModelEvidenceAdjudicator(
 }
 
 export async function adjudicateEvidence(
-  input: EvidenceAdjudicationInput & { adjudicator?: EvidenceAdjudicator },
+  input: EvidenceAdjudicationInput & {
+    adjudicator?: EvidenceAdjudicator;
+    onAttempt?: (candidateCount: number) => void;
+    onFailure?: (error: unknown, candidates: readonly EvidenceCandidate[]) => void;
+  },
 ): Promise<EvidenceAdjudication[]> {
   if (!input.adjudicator || input.candidates.length === 0) return [];
   const maxCandidatesPerCall = 6;
+  // The Article Lens consumes the first model step. Reserve it so the
+  // aggregate analysis never exceeds the depth's model-call ceiling.
+  const maxAdjudicationCalls = Math.max(0, input.budget.maxModelSteps - 1);
   const decisions: EvidenceAdjudication[] = [];
-  for (let offset = 0; offset < input.candidates.length; offset += maxCandidatesPerCall) {
+  for (
+    let offset = 0, calls = 0;
+    offset < input.candidates.length && calls < maxAdjudicationCalls;
+    offset += maxCandidatesPerCall, calls += 1
+  ) {
     const batch = input.candidates.slice(offset, offset + maxCandidatesPerCall);
-    decisions.push(
-      ...(await input.adjudicator.adjudicate({
-        ...input,
-        candidates: batch,
-      })),
-    );
+    input.onAttempt?.(batch.length);
+    try {
+      decisions.push(
+        ...(await input.adjudicator.adjudicate({
+          ...input,
+          candidates: batch,
+        })),
+      );
+    } catch (error) {
+      if (input.signal?.aborted) throw error;
+      if (!input.onFailure) throw error;
+      // One malformed/slow model batch must not erase the article-derived
+      // report or evidence accepted from earlier batches. Keep the run
+      // progressive and record the degraded adjudication in telemetry.
+      input.onFailure?.(error, batch);
+    }
   }
   return decisions;
 }
