@@ -1,12 +1,13 @@
 import {
   JournalistContextResultSchema,
+  PoliticalContextResultSchema,
   type JournalistContextResult,
   type PoliticalContextResult,
 } from "@perspectica/contracts";
 import type { AnalysisPlan } from "@perspectica/contracts/report";
 import type { ArticleIndex } from "@perspectica/contracts/article";
 import { EvidenceLedger } from "../evidence/source-ledger";
-import { projectArticleCompass } from "../compass/calculate";
+import { projectArticleCompass, projectCompassWithContext } from "../compass/calculate";
 
 export interface PerspectiveResult {
   compass: ReturnType<typeof projectArticleCompass>;
@@ -53,13 +54,72 @@ export function synthesizePerspective(
     }),
     emptyReason: journalistAssertions.length > 0 ? undefined : "no-verified-evidence",
   });
+  const contextAssertions = ledger.getAssertions().filter((assertion) => assertion.context);
+  const contextSources = new Map(ledger.getSources().map((source) => [source.id, source]));
+  const politicalContext: PoliticalContextResult = PoliticalContextResultSchema.parse(
+    contextAssertions.length === 0
+      ? {
+          status: "empty",
+          summary:
+            "No source-backed publication, journalist, or comparable-coverage signal was verified.",
+          signals: [],
+        }
+      : {
+          status: "ready",
+          summary:
+            "The article-led placement was checked against bounded source-backed context. Context signals describe coverage history, not an author's identity or motive.",
+          signals: contextAssertions.slice(0, 8).flatMap((assertion) => {
+            const context = assertion.context;
+            const source = contextSources.get(assertion.sourceId);
+            if (!context || !source) return [];
+            return [
+              {
+                id: assertion.id,
+                sourceKind: context.sourceKind,
+                subject: context.subject,
+                score: context.score,
+                direction: context.direction,
+                strength: context.strength,
+                relevance: context.relevance,
+                explanation: context.explanation,
+                sourceTitle: source.title,
+                publication: source.publication,
+                url: source.canonicalUrl,
+                ...(source.contentKind === "source-text"
+                  ? {
+                      citationKind: "source-excerpt" as const,
+                      excerpt: assertion.excerpt ?? source.content.slice(0, 400),
+                    }
+                  : { citationKind: "search-summary" as const, excerpt: null }),
+              },
+            ];
+          }),
+          weighting: {
+            articleWeight: 0.6,
+            publicationHistory:
+              contextAssertions.filter(
+                (assertion) => assertion.context?.sourceKind === "publication-history",
+              ).length / Math.max(contextAssertions.length, 1),
+            journalistWork:
+              contextAssertions.filter(
+                (assertion) => assertion.context?.sourceKind === "journalist-work",
+              ).length / Math.max(contextAssertions.length, 1),
+            comparableCoverage:
+              contextAssertions.filter(
+                (assertion) => assertion.context?.sourceKind === "comparable-coverage",
+              ).length / Math.max(contextAssertions.length, 1),
+            topicContext:
+              contextAssertions.filter(
+                (assertion) => assertion.context?.sourceKind === "topic-context",
+              ).length / Math.max(contextAssertions.length, 1),
+            rationale:
+              "Article-owned signals remain the anchor; accepted contextual signals contribute no more than forty percent.",
+          },
+        },
+  );
   return {
-    compass: projectArticleCompass(index, plan),
-    politicalContext: {
-      status: "empty",
-      summary: "Article-owned evidence remains the primary spectrum basis in this bounded pass.",
-      signals: [],
-    },
+    compass: projectCompassWithContext(index, plan, politicalContext),
+    politicalContext,
     journalistContext,
   };
 }

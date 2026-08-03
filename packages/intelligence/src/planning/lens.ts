@@ -117,6 +117,75 @@ function planClaims(index: ArticleIndex, budget: AnalysisBudget): PlannedClaim[]
     }));
 }
 
+function signalAttribution(
+  index: ArticleIndex,
+  paragraphIds: string[],
+  sentenceIds: string[],
+): boolean {
+  const sentences = sentenceIds.flatMap((id) => (index.sentences[id] ? [index.sentences[id]] : []));
+  if (sentences.length > 0)
+    return sentences.some((sentence) =>
+      Boolean(sentence.speaker || sentence.attributionVerb || sentence.isQuoted),
+    );
+  return paragraphIds.some((id) => Boolean(index.paragraphs[id]?.speaker));
+}
+
+export function groundedArticleSignals(
+  signals: AnalysisPlan["articleSignals"],
+  index: ArticleIndex,
+): AnalysisPlan["articleSignals"] {
+  const compass = signals.compass
+    .flatMap((signal) => {
+      const paragraphIds = signal.paragraphIds.filter((id) => Boolean(index.paragraphs[id]));
+      if (paragraphIds.length === 0) return [];
+      const allowedSentenceIds = new Set(
+        paragraphIds.flatMap((paragraphId) => index.paragraphs[paragraphId]?.sentenceIds ?? []),
+      );
+      const sentenceIds = signal.sentenceIds.filter((id) => allowedSentenceIds.has(id));
+      const groundedSentenceIds = sentenceIds.length
+        ? sentenceIds
+        : (index.paragraphs[paragraphIds[0]!]?.sentenceIds.slice(0, 4) ?? []);
+      if (groundedSentenceIds.length === 0) return [];
+      const score = Math.max(-3, Math.min(3, signal.score));
+      return [
+        {
+          ...signal,
+          paragraphIds: paragraphIds.slice(0, 8),
+          sentenceIds: groundedSentenceIds.slice(0, 8),
+          score,
+          direction: score < -0.2 ? "left" : score > 0.2 ? "right" : "center",
+          attributed: signalAttribution(index, paragraphIds, groundedSentenceIds),
+        } satisfies ArticleCompassSignal,
+      ];
+    })
+    .slice(0, 8);
+  const bias = signals.bias
+    .flatMap((signal) => {
+      const paragraph = index.paragraphs[signal.paragraphId];
+      if (!paragraph) return [];
+      const sentence = signal.sentenceId ? index.sentences[signal.sentenceId] : undefined;
+      if (sentence && sentence.paragraphId !== signal.paragraphId) return [];
+      const excerpt = signal.excerpt.trim();
+      if (
+        !excerpt ||
+        !new RegExp(excerpt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i").test(paragraph.text)
+      )
+        return [];
+      const sentenceIds = sentence ? [sentence.id] : paragraph.sentenceIds.slice(0, 1);
+      return [
+        {
+          ...signal,
+          paragraphId: paragraph.id,
+          sentenceId: sentence?.id ?? sentenceIds[0] ?? null,
+          excerpt,
+          attributed: signalAttribution(index, [paragraph.id], sentenceIds),
+        } satisfies ArticleBiasSignal,
+      ];
+    })
+    .slice(0, 6);
+  return { compass, bias };
+}
+
 function mission(
   idValue: string,
   claimIds: string[],
@@ -297,11 +366,19 @@ function normalizePlan(
   const paragraphIds = new Set(index.paragraphOrder);
   const sentenceIds = new Set(Object.keys(index.sentences));
   const claims = candidate.claims
-    .map((claim) => ({
-      ...claim,
-      paragraphIds: claim.paragraphIds.filter((value) => paragraphIds.has(value)),
-      sentenceIds: claim.sentenceIds.filter((value) => sentenceIds.has(value)),
-    }))
+    .map((claim) => {
+      const groundedParagraphIds = claim.paragraphIds.filter((value) => paragraphIds.has(value));
+      const groundedParagraphSet = new Set(groundedParagraphIds);
+      return {
+        ...claim,
+        paragraphIds: groundedParagraphIds,
+        sentenceIds: claim.sentenceIds.filter(
+          (value) =>
+            sentenceIds.has(value) &&
+            groundedParagraphSet.has(index.sentences[value]?.paragraphId ?? ""),
+        ),
+      };
+    })
     .filter((claim) => claim.paragraphIds.length > 0 && claim.sentenceIds.length > 0)
     .slice(0, budget.maxClaims);
   if (claims.length === 0) return fallback;
@@ -318,10 +395,16 @@ function normalizePlan(
         missionValue.purpose === "publication-context",
     )
     .slice(0, budget.maxMissions);
+  const articleSignals = groundedArticleSignals(candidate.articleSignals, index);
+  const fallbackSignals = groundedArticleSignals(fallback.articleSignals, index);
   return AnalysisPlanSchema.parse({
     ...candidate,
     id: candidate.id || fallback.id,
     claims,
+    articleSignals: {
+      compass: articleSignals.compass.length ? articleSignals.compass : fallbackSignals.compass,
+      bias: articleSignals.bias.length ? articleSignals.bias : fallbackSignals.bias,
+    },
     missions: missions.length > 0 ? missions : fallback.missions,
     requestedParagraphIds: candidate.requestedParagraphIds
       .filter((value) => paragraphIds.has(value))

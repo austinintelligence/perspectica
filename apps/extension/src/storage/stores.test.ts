@@ -20,6 +20,18 @@ class MemoryStorage implements JsonStorageArea {
   }
 }
 
+class FailJobWriteStorage extends MemoryStorage {
+  failNextJobWrite = false;
+
+  override async set<T>(key: string, value: T): Promise<void> {
+    if (this.failNextJobWrite && key === "perspectica.jobs.v1.job-1") {
+      this.failNextJobWrite = false;
+      throw new Error("simulated job write failure");
+    }
+    await super.set(key, value);
+  }
+}
+
 function job(id: string): AnalysisJob {
   return {
     id,
@@ -171,25 +183,86 @@ describe("extension stores", () => {
         contentType: "news" as const,
       },
     };
-    await store.appendEvent({
-      protocol: 2,
-      jobId: "job-1",
-      runToken: "run-job-1",
-      sequence: 1,
-      revision: 1,
-      event,
-    });
-    await store.appendEvent({
-      protocol: 2,
-      jobId: "job-1",
-      runToken: "run-job-1",
-      sequence: 2,
-      revision: 2,
-      event,
-    });
+    await store.commitEvent({ jobId: "job-1", runToken: "run-job-1", sequence: 1, event });
+    await store.commitEvent({ jobId: "job-1", runToken: "run-job-1", sequence: 2, event });
 
     await expect(store.getEventsSince("job-1", 1)).resolves.toEqual([
       expect.objectContaining({ sequence: 2, event }),
     ]);
+  });
+
+  it("commits event rows before the job cursor and repairs a failed cursor write idempotently", async () => {
+    const storage = new FailJobWriteStorage();
+    const store = new JobStore(storage);
+    await store.set(job("job-1"));
+    const event = {
+      type: "metadata.ready" as const,
+      analysisId: "analysis-1",
+      emittedAt: "2026-07-29T12:00:00.000Z",
+      data: {
+        title: "Example",
+        author: null,
+        publication: "Example News",
+        publishedAt: null,
+        contentType: "news" as const,
+      },
+    };
+
+    storage.failNextJobWrite = true;
+    await expect(
+      store.commitEvent({
+        jobId: "job-1",
+        runToken: "run-job-1",
+        sequence: 1,
+        event,
+      }),
+    ).rejects.toThrow("simulated job write failure");
+    await expect(store.getEventsSince("job-1", 0)).resolves.toHaveLength(1);
+    await expect(store.get("job-1")).resolves.toMatchObject({ lastEventSequence: 0 });
+
+    await expect(
+      store.commitEvent({
+        jobId: "job-1",
+        runToken: "run-job-1",
+        sequence: 1,
+        event,
+      }),
+    ).resolves.toMatchObject({ accepted: true, job: { lastEventSequence: 1 } });
+    await expect(
+      store.commitEvent({
+        jobId: "job-1",
+        runToken: "run-job-1",
+        sequence: 1,
+        event,
+      }),
+    ).resolves.toMatchObject({ accepted: false, duplicate: true });
+  });
+
+  it("rejects a cursor gap instead of making an unreplayable journal", async () => {
+    const storage = new MemoryStorage();
+    const store = new JobStore(storage);
+    await store.set(job("job-1"));
+    const event = {
+      type: "metadata.ready" as const,
+      analysisId: "analysis-1",
+      emittedAt: "2026-07-29T12:00:00.000Z",
+      data: {
+        title: "Example",
+        author: null,
+        publication: "Example News",
+        publishedAt: null,
+        contentType: "news" as const,
+      },
+    };
+
+    await expect(
+      store.commitEvent({
+        jobId: "job-1",
+        runToken: "run-job-1",
+        sequence: 2,
+        event,
+      }),
+    ).resolves.toMatchObject({ accepted: false, gap: true });
+    await expect(store.getEventsSince("job-1", 0)).resolves.toEqual([]);
   });
 });

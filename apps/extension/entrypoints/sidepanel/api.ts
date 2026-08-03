@@ -157,8 +157,18 @@ export async function streamAnalysis(
         },
   );
   let deliveredSequence = options?.retrySections?.length ? job.lastEventSequence : 0;
-  let deliveredRevision = 0;
   let settled = false;
+  let replayInFlight: Promise<void> | null = null;
+  let replayRequested = false;
+  let connectedReplayStarted = false;
+  type StreamEnvelope = {
+    jobId: string;
+    runToken: string;
+    sequence: number;
+    revision: number;
+    event: PipelineEvent;
+  };
+  const pendingEnvelopes = new Map<number, StreamEnvelope>();
   let resolveDone: (() => void) | undefined;
   let rejectDone: ((error: Error) => void) | undefined;
   let unsubscribe: () => void = () => {};
@@ -203,50 +213,80 @@ export async function streamAnalysis(
       rejectDone?.(abortError());
     }
   };
-  const applyEnvelope = (envelope: {
-    jobId: string;
-    runToken: string;
-    sequence: number;
-    revision: number;
-    event: PipelineEvent;
-  }) => {
+  const applyEnvelope = (envelope: StreamEnvelope, fromReplay = false) => {
     if (settled || envelope.jobId !== job.id || envelope.runToken !== (job.runToken ?? "")) return;
     if (envelope.sequence <= deliveredSequence) return;
+    if (envelope.sequence !== deliveredSequence + 1) {
+      pendingEnvelopes.set(envelope.sequence, envelope);
+      if (!fromReplay) void replay();
+      return;
+    }
     deliveredSequence = envelope.sequence;
-    deliveredRevision = Math.max(deliveredRevision, envelope.revision);
     onEvent(envelope.event);
     finishFromEvent(envelope.event);
+    while (!settled) {
+      const next = pendingEnvelopes.get(deliveredSequence + 1);
+      if (!next) break;
+      pendingEnvelopes.delete(next.sequence);
+      applyEnvelope(next, true);
+    }
   };
   const replay = async () => {
     if (settled) return;
-    const response = await sendRuntimeRequest<{
-      jobId: string;
-      lastSequence: number;
-      events: Array<{
-        jobId: string;
-        runToken: string;
-        sequence: number;
-        revision: number;
-        event: PipelineEvent;
-      }>;
-      complete: boolean;
-    }>({ type: "analysis.getEventsSince", jobId: job.id, lastSequence: deliveredSequence });
-    for (const envelope of response.events) applyEnvelope(envelope);
-    deliveredRevision = Math.max(deliveredRevision, job.revision ?? 0);
-    const finalJob = response.complete
-      ? await sendRuntimeRequest<AnalysisJob>({ type: "analysis.getJob", jobId: job.id })
-      : null;
-    if (!settled && finalJob && terminal(finalJob.status)) {
-      settled = true;
-      cleanup();
-      if (finalJob.status === "failed") {
-        rejectDone?.(new Error(finalJob.error ?? "The analysis failed."));
-      } else if (finalJob.status === "cancelled") {
-        rejectDone?.(abortError());
-      } else {
-        resolveDone?.();
-      }
+    if (replayInFlight) {
+      replayRequested = true;
+      return replayInFlight;
     }
+    replayInFlight = (async () => {
+      do {
+        replayRequested = false;
+        let hasMore = true;
+        while (!settled && hasMore) {
+          const response = await sendRuntimeRequest<{
+            jobId: string;
+            lastSequence: number;
+            hasMore?: boolean;
+            events: StreamEnvelope[];
+            complete: boolean;
+          }>({ type: "analysis.getEventsSince", jobId: job.id, lastSequence: deliveredSequence });
+          const events = [...response.events].sort((left, right) => left.sequence - right.sequence);
+          if (
+            events.length === 0 &&
+            response.lastSequence > deliveredSequence &&
+            !response.complete
+          )
+            throw new Error(
+              "The analysis journal has a missing event gap. Reconnect and try again.",
+            );
+          for (const envelope of events) applyEnvelope(envelope, true);
+          const lastReturned = events.at(-1)?.sequence ?? deliveredSequence;
+          hasMore = Boolean(response.hasMore) || lastReturned < response.lastSequence;
+          if (hasMore && events.length === 0)
+            throw new Error("The analysis journal could not replay its next event.");
+          if (!hasMore && response.lastSequence > deliveredSequence)
+            throw new Error(
+              "The analysis journal has a missing event gap. Reconnect and try again.",
+            );
+        }
+        const finalJob =
+          !settled &&
+          (await sendRuntimeRequest<AnalysisJob>({ type: "analysis.getJob", jobId: job.id }));
+        if (!settled && finalJob && terminal(finalJob.status)) {
+          settled = true;
+          cleanup();
+          if (finalJob.status === "failed") {
+            rejectDone?.(new Error(finalJob.error ?? "The analysis failed."));
+          } else if (finalJob.status === "cancelled") {
+            rejectDone?.(abortError());
+          } else {
+            resolveDone?.();
+          }
+        }
+      } while (!settled && replayRequested);
+    })().finally(() => {
+      replayInFlight = null;
+    });
+    return replayInFlight;
   };
   unsubscribe = subscribeRuntimePushWithStatus(
     (message) => {
@@ -267,15 +307,21 @@ export async function streamAnalysis(
     },
     (status) => {
       onStatus?.(status);
-      if (status === "connected" && deliveredSequence > 0) void replay();
+      if (status === "connected") {
+        connectedReplayStarted = true;
+        void replay();
+      }
     },
   );
-  onStatus?.("connected");
   if (signal) {
     signal.addEventListener("abort", onAbort, { once: true });
     abortListenerAttached = true;
     if (signal.aborted) onAbort();
   }
-  await abortable(replay(), signal);
+  if (!connectedReplayStarted) {
+    connectedReplayStarted = true;
+    void replay();
+  }
+  await abortable(replayInFlight ?? Promise.resolve(), signal);
   if (!settled) await done;
 }

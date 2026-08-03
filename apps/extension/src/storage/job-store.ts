@@ -8,7 +8,7 @@ import {
   type AnalysisLogInput,
   type AnalysisResumeData,
 } from "../runtime/messages";
-import type { AnalysisEnvelope } from "@perspectica/contracts/events";
+import type { AnalysisEnvelope, PipelineEvent } from "@perspectica/contracts/events";
 import type { JsonStorageArea } from "./areas";
 import { AnalysisJournal } from "./job-journal";
 
@@ -17,6 +17,14 @@ const JOB_PREFIX = "perspectica.jobs.v1.";
 const LOG_PREFIX = "perspectica.jobs.logs.v1.";
 const RESUME_PREFIX = "perspectica.jobs.resume.v1.";
 const MAX_LOG_ENTRIES = 400;
+
+export interface EventCommitResult {
+  accepted: boolean;
+  duplicate?: boolean;
+  gap?: boolean;
+  job?: AnalysisJob;
+  envelope?: AnalysisEnvelope;
+}
 
 export class JobStore {
   private readonly logTails = new Map<string, Promise<void>>();
@@ -135,8 +143,79 @@ export class JobStore {
     await this.storage.remove(`${LOG_PREFIX}${id}`);
   }
 
-  async appendEvent(envelope: AnalysisEnvelope): Promise<void> {
-    await this.journal.appendEvent(envelope);
+  /**
+   * Persist the journal row before advancing the job cursor. If storage fails
+   * after the row is durable, a retry of the same request finds the row and
+   * completes the cursor update idempotently instead of losing the event.
+   */
+  async commitEvent(input: {
+    jobId: string;
+    runToken: string;
+    sequence: number;
+    event: PipelineEvent;
+  }): Promise<EventCommitResult> {
+    return this.enqueueMutation(async () => {
+      const current = await this.get(input.jobId);
+      if (!current || current.runToken !== input.runToken) {
+        return { accepted: false };
+      }
+      const existing = await this.journal.getEvent(input.jobId, input.sequence);
+      if (existing) {
+        if (
+          existing.runToken !== input.runToken ||
+          JSON.stringify(existing.event) !== JSON.stringify(input.event)
+        )
+          return { accepted: false };
+        if (current.lastEventSequence >= input.sequence)
+          return { accepted: false, duplicate: true, envelope: existing };
+        if (terminalStatus(current.status)) return { accepted: false, envelope: existing };
+        if (input.sequence !== current.lastEventSequence + 1)
+          return { accepted: false, gap: true, envelope: existing };
+        const updated = await this.setCommittedEvent(current, existing);
+        return { accepted: true, job: updated, envelope: existing };
+      }
+      if (terminalStatus(current.status)) return { accepted: false };
+      if (input.sequence <= current.lastEventSequence) return { accepted: false };
+      if (input.sequence !== current.lastEventSequence + 1) return { accepted: false, gap: true };
+      const envelope: AnalysisEnvelope = {
+        protocol: 2,
+        jobId: input.jobId,
+        runToken: input.runToken,
+        sequence: input.sequence,
+        revision: current.revision + 1,
+        event: input.event,
+      };
+      // This write is intentionally before setUnsafe. A failed job write can
+      // be repaired by the same request after a service-worker restart.
+      await this.journal.appendEvent(envelope);
+      const updated = await this.setCommittedEvent(current, envelope);
+      return { accepted: true, job: updated, envelope };
+    });
+  }
+
+  private async setCommittedEvent(
+    current: AnalysisJob,
+    envelope: AnalysisEnvelope,
+  ): Promise<AnalysisJob> {
+    const terminal =
+      envelope.event.type === "analysis.completed"
+        ? envelope.event.data.status
+        : envelope.event.type === "analysis.failed"
+          ? "failed"
+          : envelope.event.type === "analysis.cancelled"
+            ? "cancelled"
+            : null;
+    const updated = AnalysisJobSchema.parse({
+      ...current,
+      events: [],
+      status: terminal ?? "analyzing",
+      revision: envelope.revision,
+      lastEventSequence: envelope.sequence,
+      updatedAt: new Date().toISOString(),
+      error: null,
+    });
+    await this.setUnsafe(updated);
+    return updated;
   }
 
   async getEventsSince(id: string, sequence: number): Promise<AnalysisEnvelope[]> {
@@ -146,4 +225,8 @@ export class JobStore {
   async clearEvents(id: string): Promise<void> {
     await this.journal.clearEvents(id);
   }
+}
+
+function terminalStatus(status: AnalysisJob["status"]): boolean {
+  return ["complete", "partial", "failed", "cancelled"].includes(status);
 }

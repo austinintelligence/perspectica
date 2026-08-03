@@ -43,11 +43,14 @@ export function projectArticleCompass(index: ArticleIndex, plan: AnalysisPlan): 
     .slice(0, 12)
     .map((signal, position) => {
       const paragraph = index.paragraphs[signal.paragraphIds[0]!];
+      const sentence = signal.sentenceIds
+        .map((sentenceId) => index.sentences[sentenceId])
+        .find((value) => value && signal.paragraphIds.includes(value.paragraphId));
       return {
         id: `article-signal-${position + 1}`,
         paragraphId: signal.paragraphIds[0]!,
-        excerpt: paragraph?.text.slice(0, 600) ?? "Article signal",
-        speaker: paragraph?.speaker ?? null,
+        excerpt: sentence?.text ?? paragraph?.text.slice(0, 600) ?? "Article signal",
+        speaker: sentence?.speaker ?? paragraph?.speaker ?? null,
         endorsedByArticle: !signal.attributed,
         score: signal.score,
         direction: signal.direction,
@@ -119,6 +122,59 @@ export function projectArticleCompass(index: ArticleIndex, plan: AnalysisPlan): 
       journalist: 0,
       comparableCoverage: 0,
       topicContext: 0,
+    },
+  });
+}
+
+export function projectCompassWithContext(
+  index: ArticleIndex,
+  plan: AnalysisPlan,
+  context: PoliticalContextResult,
+): CompassResult {
+  const article = projectArticleCompass(index, plan);
+  if (context.status !== "ready" || context.signals.length === 0 || article.score === null) {
+    return CompassResultSchema.parse({ ...article, context });
+  }
+  const weightedContext = context.signals.reduce(
+    (total, signal) => total + signal.score * signal.strength * signal.relevance,
+    0,
+  );
+  const contextWeight = context.signals.reduce(
+    (total, signal) => total + signal.strength * signal.relevance,
+    0,
+  );
+  if (contextWeight <= 0) return CompassResultSchema.parse({ ...article, context });
+  const score =
+    Math.round(clamp(article.score * 0.6 + (weightedContext / contextWeight) * 0.4, -3, 3) * 100) /
+    100;
+  const placement = label(score);
+  const counts = {
+    publication: context.signals.filter((signal) => signal.sourceKind === "publication-history")
+      .length,
+    journalist: context.signals.filter((signal) => signal.sourceKind === "journalist-work").length,
+    comparableCoverage: context.signals.filter(
+      (signal) => signal.sourceKind === "comparable-coverage",
+    ).length,
+    topicContext: context.signals.filter((signal) => signal.sourceKind === "topic-context").length,
+  };
+  const total = Math.max(1, context.signals.length);
+  return CompassResultSchema.parse({
+    ...article,
+    label: placement,
+    displayLabel: display[placement],
+    score,
+    confidenceScore: Math.min(0.86, Math.round((article.confidenceScore * 0.7 + 0.16) * 100) / 100),
+    confidence:
+      article.confidenceScore >= 0.7 ? "high" : article.confidenceScore >= 0.42 ? "medium" : "low",
+    explanation: `${article.explanation} Bounded publication, journalist, comparable-coverage, and topic-context evidence shifted the contextual estimate cautiously toward ${display[placement].toLocaleLowerCase("en-US")}.`,
+    basis: "context-assisted",
+    context,
+    influence: {
+      article: 0.6,
+      publication: (0.4 * counts.publication) / total,
+      journalist: (0.4 * counts.journalist) / total,
+      comparableCoverage: (0.4 * counts.comparableCoverage) / total,
+      topicContext: (0.4 * counts.topicContext) / total,
     },
   });
 }

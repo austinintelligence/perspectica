@@ -1,5 +1,5 @@
 import { ArticleDocumentSchema } from "@perspectica/contracts";
-import type { AnalysisEnvelope, PipelineEvent } from "@perspectica/contracts/events";
+import type { PipelineEvent } from "@perspectica/contracts/events";
 import type { ReportSection } from "@perspectica/contracts/report";
 import { ChatGptSessionManager } from "../auth/chatgpt-session";
 import { ChromeJsonStorageArea, restrictExtensionStorage } from "../storage/areas";
@@ -660,6 +660,7 @@ export class BackgroundController {
           return ok(request.requestId, {
             jobId: request.jobId,
             lastSequence: job.lastEventSequence,
+            hasMore: events.length > 0 && events.at(-1)!.sequence < job.lastEventSequence,
             events,
             complete: terminal(job.status),
           });
@@ -709,55 +710,28 @@ export class BackgroundController {
           return ok(request.requestId, {});
         }
         case "internal.analysis.event": {
-          let envelope: AnalysisEnvelope | null = null;
-          const updated = await this.jobs.update(request.jobId, (job) => {
-            if (
-              !job.runToken ||
-              job.runToken !== request.runToken ||
-              terminal(job.status) ||
-              request.sequence <= job.lastEventSequence
-            ) {
-              return undefined;
-            }
-            const completed =
-              request.event.type === "analysis.completed"
-                ? request.event.data.status
-                : request.event.type === "analysis.failed"
-                  ? "failed"
-                  : request.event.type === "analysis.cancelled"
-                    ? "cancelled"
-                    : null;
-            const revision = job.revision + 1;
-            envelope = {
-              protocol: 2,
-              jobId: request.jobId,
-              runToken: request.runToken,
-              sequence: request.sequence,
-              revision,
-              event: request.event,
-            };
-            return {
-              ...job,
-              events: [],
-              status: completed ?? "analyzing",
-              revision,
-              lastEventSequence: request.sequence,
-              updatedAt: now(),
-              error: null,
-            };
+          const committed = await this.jobs.commitEvent({
+            jobId: request.jobId,
+            runToken: request.runToken,
+            sequence: request.sequence,
+            event: request.event,
           });
-          if (!updated) return ok(request.requestId, { ignored: true });
-          if (envelope) await this.jobs.appendEvent(envelope);
-          await this.publish({ type: "analysis.jobChanged", job: updated });
+          if (committed.gap) throw new Error("The analysis event sequence contained a gap.");
+          if (!committed.accepted || !committed.job || !committed.envelope)
+            return ok(request.requestId, {
+              ignored: true,
+              duplicate: committed.duplicate ?? false,
+            });
+          await this.publish({ type: "analysis.jobChanged", job: committed.job });
           await this.publish({
             type: "analysis.eventDelta",
             jobId: request.jobId,
             runToken: request.runToken,
-            revision: updated.revision,
+            revision: committed.job.revision,
             sequence: request.sequence,
             event: request.event,
           });
-          return ok(request.requestId, { accepted: true, revision: updated.revision });
+          return ok(request.requestId, { accepted: true, revision: committed.job.revision });
         }
         case "internal.analysis.log": {
           const job = await this.jobs.get(request.jobId);
@@ -779,7 +753,6 @@ export class BackgroundController {
               ...job,
               status: "failed",
               revision: job.revision + 1,
-              lastEventSequence: request.sequence,
               updatedAt: now(),
               error: "The analysis ended before it produced a completion event. Try again.",
             };
@@ -801,7 +774,6 @@ export class BackgroundController {
               ...job,
               status: "failed",
               revision: job.revision + 1,
-              lastEventSequence: request.sequence,
               updatedAt: now(),
               error: request.error,
             };

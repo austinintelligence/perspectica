@@ -79,13 +79,27 @@ export function usePerspecticaChatGpt(): PerspecticaChatGptConnection {
           setAuth(result.state);
           setDevice(null);
           setConnecting(false);
+          setError(null);
           return;
         }
         timer = setTimeout(poll, Math.max(1_500, device.intervalMs));
       } catch (cause) {
         if (cancelled) return;
-        setError(cause instanceof Error ? cause.message : "ChatGPT sign-in did not finish.");
-        setConnecting(false);
+        if (Date.now() >= device.expiresAt) {
+          setAuth((current) => ({
+            ...current,
+            status: "expired",
+            error: "The one-time sign-in code expired. Start a new Login with ChatGPT flow.",
+          }));
+          setDevice(null);
+          setConnecting(false);
+          return;
+        }
+        // Polling errors are transient (the browser may briefly lose access
+        // to OpenAI). Keep the device authorization alive and schedule the
+        // next poll instead of leaving the UI permanently pending.
+        setError(cause instanceof Error ? cause.message : "ChatGPT sign-in is still pending.");
+        timer = setTimeout(poll, Math.max(1_500, device.intervalMs));
       }
     };
     timer = setTimeout(poll, Math.max(500, device.intervalMs));

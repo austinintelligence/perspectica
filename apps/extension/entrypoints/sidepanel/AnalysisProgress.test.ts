@@ -14,6 +14,7 @@ describe("analysis pipeline progress", () => {
         ...state,
         phase: "retrieval",
         research: {
+          candidateCount: 3,
           completedMissions: 2,
           totalMissions: 4,
           acceptedSources: 3,

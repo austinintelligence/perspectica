@@ -2,10 +2,10 @@ import { normalizeCanonicalUrl, normalizeEvidenceText } from "@perspectica/contr
 
 export { normalizeCanonicalUrl, normalizeEvidenceText };
 
-export function sourceIdFor(url: string, provider: string): string {
+export function sourceIdFor(url: string, namespace = "source"): string {
   const canonical = normalizeCanonicalUrl(url) ?? url;
   let hash = 0x811c9dc5;
-  const value = `${provider}:${canonical}`;
+  const value = `${namespace}:${canonical}`;
   for (let index = 0; index < value.length; index += 1) {
     hash ^= value.charCodeAt(index);
     hash = Math.imul(hash, 0x01000193);

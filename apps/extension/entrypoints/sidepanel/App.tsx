@@ -1,4 +1,5 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useRef,
@@ -37,6 +38,7 @@ import {
   isAnalysisActive,
 } from "./report-state";
 import { ReportStore } from "./report-store";
+import type { ReportSectionKey } from "./report-store";
 import {
   extensionMode,
   clearAnalysisLogs,
@@ -359,6 +361,136 @@ export function ProvisionalCompassWarning() {
   );
 }
 
+function useReportSection<K extends ReportSectionKey>(store: ReportStore, section: K) {
+  const subscribe = useCallback(
+    (listener: () => void) => store.subscribeSection(section, listener),
+    [section, store],
+  );
+  const getSnapshot = useCallback(() => store.getSectionSnapshot(section), [section, store]);
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+const ConnectedCompass = memo(function ConnectedCompass({ store }: { store: ReportStore }) {
+  const section = useReportSection(store, "compass");
+  return section.data ? (
+    <>
+      <Compass result={section.data} />
+      {section.status === "error" ? <ProvisionalCompassWarning /> : null}
+    </>
+  ) : (
+    <div className="compass-placeholder">
+      <TargetIcon />
+      <span>
+        <small>Political Spectrum</small>
+        <strong>{section.status === "error" ? "Unavailable" : "Finding placement…"}</strong>
+      </span>
+    </div>
+  );
+});
+
+const ConnectedBias = memo(function ConnectedBias({ store }: { store: ReportStore }) {
+  const section = useReportSection(store, "bias");
+  const data = section.data;
+  return (
+    <Section id="bias" title="Bias" status={section.status} error={section.error}>
+      {data ? (
+        data.readerCopy ? (
+          <ReaderCopyBody
+            copy={data.readerCopy}
+            labels={new Map(data.findings.map((finding) => [finding.id, finding.displayName]))}
+            citations={
+              new Map(
+                (data.citations ?? []).map((citation: ReaderCitation) => [citation.id, citation]),
+              )
+            }
+          />
+        ) : (
+          <>
+            <p>
+              <ProgressiveText text={data.summary} />
+            </p>
+            {data.findings.map((finding) => (
+              <div className="finding" key={finding.id}>
+                <h3>{finding.displayName}</h3>
+                <blockquote>
+                  <ProgressiveText text={`“${finding.excerpt}”`} />
+                </blockquote>
+                <p>
+                  <ProgressiveText text={finding.explanation} />
+                </p>
+              </div>
+            ))}
+          </>
+        )
+      ) : null}
+    </Section>
+  );
+});
+
+const ConnectedJournalistContext = memo(function ConnectedJournalistContext({
+  store,
+}: {
+  store: ReportStore;
+}) {
+  const section = useReportSection(store, "journalistContext");
+  return (
+    <Section
+      id="journalist-context"
+      title="Journalist Context"
+      status={section.status}
+      error={section.error}
+    >
+      {section.data ? <JournalistBody result={section.data} /> : null}
+    </Section>
+  );
+});
+
+const ConnectedEvidence = memo(function ConnectedEvidence({
+  store,
+  section: sectionKey,
+  title,
+  id,
+}: {
+  store: ReportStore;
+  section: "supporting" | "contradicting";
+  title: string;
+  id: string;
+}) {
+  const section = useReportSection(store, sectionKey);
+  return (
+    <Section id={id} title={title} status={section.status} error={section.error}>
+      {section.data ? <EvidenceBody result={section.data} /> : null}
+    </Section>
+  );
+});
+
+const ConnectedAdditionalContext = memo(function ConnectedAdditionalContext({
+  store,
+}: {
+  store: ReportStore;
+}) {
+  const section = useReportSection(store, "additionalContext");
+  return (
+    <Section
+      id="additional-context"
+      title="Additional Context"
+      status={section.status}
+      error={section.error}
+    >
+      {section.data ? <AdditionalContextBody result={section.data} /> : null}
+    </Section>
+  );
+});
+
+const ConnectedSourceList = memo(function ConnectedSourceList({ store }: { store: ReportStore }) {
+  const section = useReportSection(store, "sourceList");
+  return (
+    <Section id="sources" title="Works Cited" status={section.status} error={section.error}>
+      {section.data ? <SourceListBody result={section.data} /> : null}
+    </Section>
+  );
+});
+
 function AnalysisReport({ preferences, onOpenSettings }: AnalysisReportProps) {
   const reportStoreRef = useRef<ReportStore | null>(null);
   reportStoreRef.current ??= new ReportStore();
@@ -558,111 +690,28 @@ function AnalysisReport({ preferences, onOpenSettings }: AnalysisReportProps) {
           <PartialReportNotice onRetry={retryIncompleteSections} />
         ) : null}
 
-        {state.compass.data ? (
-          <>
-            <Compass result={state.compass.data} />
-            {state.compass.status === "error" ? <ProvisionalCompassWarning /> : null}
-          </>
-        ) : (
-          <div className="compass-placeholder">
-            <TargetIcon />
-            <span>
-              <small>Political Spectrum</small>
-              <strong>
-                {state.compass.status === "error" ? "Unavailable" : "Finding placement…"}
-              </strong>
-            </span>
-          </div>
-        )}
-
-        <Section id="bias" title="Bias" status={state.bias.status} error={state.bias.error}>
-          {state.bias.data ? (
-            state.bias.data.readerCopy ? (
-              <ReaderCopyBody
-                copy={state.bias.data.readerCopy}
-                labels={
-                  new Map(
-                    state.bias.data.findings.map((finding) => [finding.id, finding.displayName]),
-                  )
-                }
-                citations={
-                  new Map(
-                    (state.bias.data.citations ?? []).map((citation: ReaderCitation) => [
-                      citation.id,
-                      citation,
-                    ]),
-                  )
-                }
-              />
-            ) : (
-              <>
-                <p>
-                  <ProgressiveText text={state.bias.data.summary} />
-                </p>
-                {state.bias.data.findings.map((finding) => (
-                  <div className="finding" key={finding.id}>
-                    <h3>{finding.displayName}</h3>
-                    <blockquote>
-                      <ProgressiveText text={`“${finding.excerpt}”`} />
-                    </blockquote>
-                    <p>
-                      <ProgressiveText text={finding.explanation} />
-                    </p>
-                  </div>
-                ))}
-              </>
-            )
-          ) : null}
-        </Section>
-
-        <Section
-          id="journalist-context"
-          title="Journalist Context"
-          status={state.journalistContext.status}
-          error={state.journalistContext.error}
-        >
-          {state.journalistContext.data ? (
-            <JournalistBody result={state.journalistContext.data} />
-          ) : null}
-        </Section>
-
-        <Section
+        <ConnectedCompass store={reportStore} />
+        <ConnectedBias store={reportStore} />
+        <ConnectedJournalistContext store={reportStore} />
+        <ConnectedEvidence
+          store={reportStore}
+          section="supporting"
           id="supporting"
           title="Supporting Information"
-          status={state.supporting.status}
-          error={state.supporting.error}
-        >
-          {state.supporting.data ? <EvidenceBody result={state.supporting.data} /> : null}
-        </Section>
-
-        <Section
+        />
+        <ConnectedEvidence
+          store={reportStore}
+          section="contradicting"
           id="contradicting"
           title="Contradicting Information"
-          status={state.contradicting.status}
-          error={state.contradicting.error}
-        >
-          {state.contradicting.data ? <EvidenceBody result={state.contradicting.data} /> : null}
-        </Section>
+        />
+        <ConnectedAdditionalContext store={reportStore} />
+        <ConnectedSourceList store={reportStore} />
 
-        <Section
-          id="additional-context"
-          title="Additional Context"
-          status={state.additionalContext.status}
-          error={state.additionalContext.error}
-        >
-          {state.additionalContext.data ? (
-            <AdditionalContextBody result={state.additionalContext.data} />
-          ) : null}
-        </Section>
-
-        <Section
-          id="sources"
-          title="Works Cited"
-          status={state.sourceList.status}
-          error={state.sourceList.error}
-        >
-          {state.sourceList.data ? <SourceListBody result={state.sourceList.data} /> : null}
-        </Section>
+        {/* Legacy section markup removed in favor of connected sections.
+                {state.compass.status === "error" ? "Unavailable" : "Finding placement…"}
+                      <ProgressiveText text={`“${finding.excerpt}”`} />
+        */}
 
         <footer className="telemetry-footer">
           <button
@@ -783,24 +832,39 @@ function ChatGptApp() {
     };
   }, []);
 
-  const updatePreferences = (next: SettingsPreferences) => {
-    if (!runtime) return;
+  const updatePreferences = async (next: SettingsPreferences): Promise<void> => {
+    if (!runtime) throw new Error("Perspectica settings are still loading.");
+    const previous = runtime;
     const updated: ExtensionPreferences = {
       ...runtime.preferences,
       ...next,
     };
     setRuntime({ ...runtime, preferences: updated });
-    void updateExtensionPreferences(updated);
+    try {
+      const saved = await updateExtensionPreferences(updated);
+      setRuntime((current) => (current ? { ...current, preferences: saved } : current));
+    } catch (error) {
+      setRuntime(previous);
+      throw error;
+    }
   };
 
   const updateSearchProvider = async (provider: SearchProviderKind) => {
     if (!runtime) throw new Error("Perspectica settings are still loading.");
+    const previous = runtime;
     const test = await testSearchProvider(provider);
     if (!test.available) throw new Error(`${provider} search is not available.`);
     const updated = { ...runtime.preferences, searchProvider: provider };
     setRuntime({ ...runtime, preferences: updated });
     setProviderReady(true);
-    await updateExtensionPreferences(updated);
+    try {
+      const saved = await updateExtensionPreferences(updated);
+      setRuntime((current) => (current ? { ...current, preferences: saved } : current));
+    } catch (error) {
+      setRuntime(previous);
+      setProviderReady(previous.preferences.searchProvider === "chatgpt" || previous.hasExaKey);
+      throw error;
+    }
   };
 
   let page: ReactNode;

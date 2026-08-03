@@ -302,6 +302,81 @@ describe("V2 append-only stream replay", () => {
     expect(received).toHaveLength(1);
   });
 
+  it("replays the exact missing range before applying an out-of-order live event", async () => {
+    const initial = job();
+    const stream = setup(initial);
+    let replayCount = 0;
+    runtime.sendRuntimeRequest.mockImplementation(
+      async (request: { type: string; lastSequence?: number }) => {
+        if (request.type === "runtime.getState")
+          return {
+            runtimeProtocol: 6,
+            auth: {
+              status: "authenticated",
+              account: null,
+              remembered: true,
+              models: [],
+              error: null,
+            },
+            preferences: {
+              ...preferences,
+              mode: "balanced",
+              searchProvider: "chatgpt",
+              rememberChatGpt: true,
+            },
+            activeJob: initial,
+            hasExaKey: false,
+          };
+        if (request.type === "analysis.start") return initial;
+        if (request.type === "analysis.getEventsSince") {
+          replayCount += 1;
+          return replayCount === 1
+            ? { jobId: initial.id, lastSequence: 0, events: [], complete: false }
+            : {
+                jobId: initial.id,
+                lastSequence: 2,
+                events: [
+                  {
+                    jobId: initial.id,
+                    runToken: "run-1",
+                    sequence: 1,
+                    revision: 1,
+                    event: event("metadata.ready", 1),
+                  },
+                  {
+                    jobId: initial.id,
+                    runToken: "run-1",
+                    sequence: 2,
+                    revision: 2,
+                    event: event("phase.changed", 2),
+                  },
+                ],
+                complete: false,
+              };
+        }
+        return initial;
+      },
+    );
+    const received: PipelineEvent[] = [];
+    const pending = streamAnalysis(received.push.bind(received), undefined, preferences);
+    await vi.waitFor(() => expect(replayCount).toBe(1));
+    stream.emit({
+      type: "analysis.eventDelta",
+      jobId: initial.id,
+      runToken: "run-1",
+      revision: 3,
+      sequence: 3,
+      event: event("analysis.completed", 3),
+    });
+
+    await expect(pending).resolves.toBeUndefined();
+    expect(received.map((value) => value.type)).toEqual([
+      "metadata.ready",
+      "phase.changed",
+      "analysis.completed",
+    ]);
+  });
+
   it("rejects terminal failure and sends one cancellation on abort", async () => {
     const initial = job();
     const stream = setup(initial);

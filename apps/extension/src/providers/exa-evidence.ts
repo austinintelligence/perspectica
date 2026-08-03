@@ -1,12 +1,12 @@
+import { EvidenceCandidateSchema } from "@perspectica/contracts/evidence";
 import type {
+  EvidenceCandidate,
   EvidenceBatch,
   EvidenceRetriever,
   RetrievalPlan,
-  RetrievalMission,
-  EvidenceCard,
 } from "@perspectica/contracts/evidence";
 import { normalizeCanonicalUrl } from "@perspectica/contracts/url";
-import { runPriorityTasks } from "@perspectica/intelligence";
+import { runPriorityTasksStream, sourceIdFor } from "@perspectica/intelligence";
 import type { EvidenceResultCache } from "../storage/evidence-cache";
 import { z } from "zod";
 
@@ -37,15 +37,7 @@ function publication(url: string): string {
   }
 }
 
-function relationship(mission: RetrievalMission): EvidenceCard["relationship"] {
-  if (mission.purpose === "correction-or-qualification") return "qualifies";
-  if (mission.purpose === "primary-record" || mission.purpose === "independent-verification")
-    return "supports";
-  if (mission.purpose === "comparable-coverage") return "adds-context";
-  return "adds-context";
-}
-
-function sourceType(url: string): EvidenceCard["sourceType"] {
+function sourceType(url: string): EvidenceCandidate["sourceType"] {
   return /\.(?:gov|mil|edu)(?:\.|\/|$)/i.test(url) ||
     /(?:record|filing|bill|data|report|pdf)/i.test(url)
     ? "primary-record"
@@ -59,7 +51,7 @@ function publishedAt(value: string | null | undefined): string | null {
 }
 
 export class ExaEvidenceRetriever implements EvidenceRetriever {
-  private readonly cache = new Map<string, { expiresAt: number; results: EvidenceCard[] }>();
+  private readonly cache = new Map<string, { expiresAt: number; results: EvidenceCandidate[] }>();
 
   constructor(
     private readonly apiKey: string,
@@ -68,7 +60,14 @@ export class ExaEvidenceRetriever implements EvidenceRetriever {
     private readonly persistentCache?: EvidenceResultCache,
   ) {}
 
-  private async search(mission: RetrievalMission, signal: AbortSignal): Promise<EvidenceBatch> {
+  private async search(
+    mission: RetrievalPlan["missions"][number],
+    signal: AbortSignal,
+  ): Promise<EvidenceBatch> {
+    if (signal.aborted)
+      throw signal.reason instanceof Error
+        ? signal.reason
+        : new DOMException("Evidence retrieval deadline reached.", "TimeoutError");
     const startedAt = Date.now();
     const query = mission.queryVariants[0] ?? "independent context";
     const cacheKey = JSON.stringify({
@@ -79,23 +78,33 @@ export class ExaEvidenceRetriever implements EvidenceRetriever {
     });
     const cached = this.cache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
+      const candidates = cached.results.map((candidate) => ({
+        ...candidate,
+        missionId: mission.id,
+      }));
       this.onDiagnostics?.({
         missionId: mission.id,
         durationMs: Date.now() - startedAt,
-        resultCount: cached.results.length,
+        resultCount: candidates.length,
         cacheHit: true,
         outcome: "ready",
       });
       return {
         missionId: mission.id,
         provider: "exa",
-        cards: cached.results,
+        candidates,
+        coveredMissionIds: [mission.id],
+        status: "completed",
+        error: null,
         searched: true,
         cacheHit: true,
         durationMs: Date.now() - startedAt,
       };
     }
-    const persisted = await this.persistentCache?.get<EvidenceCard[]>(cacheKey);
+    const persistedRaw = await this.persistentCache?.get<unknown[]>(cacheKey);
+    const persisted = (persistedRaw ?? [])
+      .map((candidate) => EvidenceCandidateSchema.safeParse(candidate))
+      .flatMap((parsed) => (parsed.success ? [{ ...parsed.data, missionId: mission.id }] : []));
     if (persisted?.length) {
       this.cache.set(cacheKey, { expiresAt: Date.now() + 24 * 60 * 60_000, results: persisted });
       this.onDiagnostics?.({
@@ -108,7 +117,10 @@ export class ExaEvidenceRetriever implements EvidenceRetriever {
       return {
         missionId: mission.id,
         provider: "exa",
-        cards: persisted,
+        candidates: persisted,
+        coveredMissionIds: [mission.id],
+        status: "completed",
+        error: null,
         searched: false,
         cacheHit: true,
         durationMs: Date.now() - startedAt,
@@ -133,7 +145,7 @@ export class ExaEvidenceRetriever implements EvidenceRetriever {
     });
     if (!response.ok) throw new Error(`Exa search failed (${response.status}).`);
     const parsed = ExaResponseSchema.parse(await response.json());
-    const cards: EvidenceCard[] = parsed.results.flatMap((raw) => {
+    const candidates: EvidenceCandidate[] = parsed.results.flatMap((raw) => {
       const result = ExaResultSchema.safeParse(raw);
       if (!result.success) return [];
       const url = normalizeCanonicalUrl(result.data.url);
@@ -149,37 +161,40 @@ export class ExaEvidenceRetriever implements EvidenceRetriever {
       const excerpt = (result.data.highlights?.[0] ?? content.slice(0, 360)).trim();
       return [
         {
+          id: sourceIdFor(url, "candidate"),
           missionId: mission.id,
-          claimId: mission.claimIds[0] ?? null,
           sourceUrl: url,
           title: result.data.title?.trim() || publication(url),
           publication: publication(url),
           publishedAt: publishedAt(result.data.publishedDate),
-          statement: excerpt,
-          excerpt,
           content,
           contentKind: "source-text",
-          relationship: relationship(mission),
           sourceType: sourceType(url),
-          confidence: Math.max(0.35, Math.min(0.95, result.data.score ?? 0.65)),
+          discoveryContext: null,
+          discoveryExcerpt: excerpt,
+          providerScore:
+            result.data.score == null ? null : Math.max(0, Math.min(1, result.data.score)),
           provider: "exa",
-        } satisfies EvidenceCard,
+        } satisfies EvidenceCandidate,
       ];
     });
-    this.cache.set(cacheKey, { expiresAt: Date.now() + 24 * 60 * 60_000, results: cards });
-    await this.persistentCache?.set(cacheKey, cards, 24 * 60 * 60_000);
+    this.cache.set(cacheKey, { expiresAt: Date.now() + 24 * 60 * 60_000, results: candidates });
+    await this.persistentCache?.set(cacheKey, candidates, 24 * 60 * 60_000);
     if (this.cache.size > 96) this.cache.delete(this.cache.keys().next().value ?? "");
     this.onDiagnostics?.({
       missionId: mission.id,
       durationMs: Date.now() - startedAt,
-      resultCount: cards.length,
+      resultCount: candidates.length,
       cacheHit: false,
       outcome: "ready",
     });
     return {
       missionId: mission.id,
       provider: "exa",
-      cards,
+      candidates,
+      coveredMissionIds: [mission.id],
+      status: "completed",
+      error: null,
       searched: true,
       cacheHit: false,
       durationMs: Date.now() - startedAt,
@@ -187,6 +202,19 @@ export class ExaEvidenceRetriever implements EvidenceRetriever {
   }
 
   async *retrieve(plan: RetrievalPlan, signal: AbortSignal): AsyncIterable<EvidenceBatch> {
+    const controller = new AbortController();
+    const abortFromParent = () => controller.abort(signal.reason);
+    if (signal.aborted) abortFromParent();
+    else signal.addEventListener("abort", abortFromParent, { once: true });
+    const deadlineTimer = setTimeout(
+      () => {
+        if (!controller.signal.aborted)
+          controller.abort(
+            new DOMException("Evidence retrieval deadline reached.", "TimeoutError"),
+          );
+      },
+      Math.max(0, plan.deadlineAt - Date.now()),
+    );
     const tasks = [...plan.missions]
       .sort((left, right) => right.priority - left.priority)
       .map((mission) => ({
@@ -194,7 +222,11 @@ export class ExaEvidenceRetriever implements EvidenceRetriever {
         run: async (): Promise<EvidenceBatch> => {
           const startedAt = Date.now();
           try {
-            return await this.search(mission, signal);
+            if (controller.signal.aborted)
+              throw controller.signal.reason instanceof Error
+                ? controller.signal.reason
+                : new DOMException("Evidence retrieval deadline reached.", "TimeoutError");
+            return await this.search(mission, controller.signal);
           } catch (error) {
             if (signal.aborted) throw error;
             this.onDiagnostics?.({
@@ -208,7 +240,10 @@ export class ExaEvidenceRetriever implements EvidenceRetriever {
             return {
               missionId: mission.id,
               provider: "exa",
-              cards: [],
+              candidates: [],
+              coveredMissionIds: [mission.id],
+              status: "failed",
+              error: error instanceof Error ? error.message : String(error),
               searched: true,
               cacheHit: false,
               durationMs: Date.now() - startedAt,
@@ -216,10 +251,14 @@ export class ExaEvidenceRetriever implements EvidenceRetriever {
           }
         },
       }));
-    const batches = await runPriorityTasks(tasks, plan.maxConcurrency, signal);
-    for (const batch of batches) {
-      yield batch;
-      if (Date.now() >= plan.deadlineAt) break;
+    try {
+      for await (const batch of runPriorityTasksStream(tasks, plan.maxConcurrency, signal)) {
+        yield batch;
+      }
+    } finally {
+      clearTimeout(deadlineTimer);
+      signal.removeEventListener("abort", abortFromParent);
+      controller.abort();
     }
   }
 }

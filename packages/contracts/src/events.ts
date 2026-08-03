@@ -71,6 +71,7 @@ export const PipelineEventSchema = z.discriminatedUnion("type", [
   event(
     "research.progress",
     z.object({
+      candidateCount: z.number().int().nonnegative().default(0),
       completedMissions: z.number().int().nonnegative(),
       totalMissions: z.number().int().nonnegative(),
       acceptedSources: z.number().int().nonnegative(),

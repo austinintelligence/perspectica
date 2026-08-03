@@ -138,9 +138,10 @@ See [`docs/public-deployment.md`](docs/public-deployment.md) for the store check
 
 V2 builds one compact `ArticleIndex`, creates an adaptive `AnalysisPlan`, and runs a global
 `RetrievalCoordinator` against a shared source ledger and evidence graph. Fast, balanced, and deep
-modes change passage, mission, concurrency, deadline, and output budgets. Evidence is validated
-once before it can serve any report section, and sections only project the ledger; the side panel
-never reconciles sources itself.
+modes change passage, mission, concurrency, deadline, and output budgets. Providers return
+candidate sources only; a bounded adjudication step maps exact candidate IDs to article claims and
+relationships, and centralized validation is required before an assertion can serve any report
+section. The side panel only projects validated ledger assertions.
 
 Exa uses bounded search requests with returned text/highlights. Native ChatGPT web search is one
 bounded global search workflow: its URL-attributed results are `search-summary` evidence and are

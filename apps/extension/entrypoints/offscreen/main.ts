@@ -2,6 +2,7 @@ import { createChatGPT } from "@opencoredev/loginwithchatgpt-ai";
 import type { ChatGPTTokens, ReasoningEffort } from "@opencoredev/loginwithchatgpt-core";
 import {
   analyzeArticle,
+  createModelEvidenceAdjudicator,
   retryArticleSections,
   type AnalysisArtifacts,
   type PipelineTelemetry,
@@ -199,7 +200,7 @@ async function testSearchProvider(
       controller.signal,
     );
     const first = await iterator[Symbol.asyncIterator]().next();
-    const sourceCount = first.done ? 0 : first.value.cards.length;
+    const sourceCount = first.done ? 0 : first.value.candidates.length;
     if (sourceCount === 0)
       throw new Error("ChatGPT completed the request but did not return a web source.");
     return { available: true, sourceCount };
@@ -236,6 +237,7 @@ async function runJob(
       article: command.request.article,
       retriever,
       model,
+      adjudicator: createModelEvidenceAdjudicator(model),
       modelVersion: preferences.model,
       reasoningEffort: preferences.reasoningEffort,
       mode: preferences.mode,
@@ -340,7 +342,7 @@ async function runRetryJob(
       reasoningEffort: "medium" as const,
       mode: "balanced" as const,
     };
-    const { retriever } = await createRetriever(
+    const { model, retriever } = await createRetriever(
       jobId,
       preferences.model,
       preferences.reasoningEffort,
@@ -349,6 +351,7 @@ async function runRetryJob(
     for await (const event of retryArticleSections({
       artifacts,
       retriever,
+      adjudicator: createModelEvidenceAdjudicator(model),
       sections: command.sections,
       signal: controller.signal,
       onTelemetry: (telemetry) => logTelemetry(jobId, telemetry),

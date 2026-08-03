@@ -155,8 +155,9 @@ export type PoliticalContextSourceKind = z.infer<typeof PoliticalContextSourceKi
  *
  * `source-excerpt` is copied from retrieved page text and may be rendered as a
  * quotation. `search-summary` is a provider-generated, URL-attributed search
- * note. It may support a cautious paraphrase, but must never be displayed as a
- * quotation or described as page text.
+ * note. It may provide a clearly labeled contextual paraphrase, but cannot
+ * establish support, contradiction, or qualification and must never be displayed
+ * as a quotation or described as page text.
  *
  * The field remains optional on exact-excerpt variants so stored reports from
  * older builds stay wire-compatible.

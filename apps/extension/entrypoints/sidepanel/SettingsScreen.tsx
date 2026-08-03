@@ -18,7 +18,7 @@ export type SettingsPreferences = AnalysisPreferences & { mode: AnalysisMode };
 interface SettingsScreenProps {
   authenticated: boolean;
   preferences: SettingsPreferences;
-  onChange: (preferences: SettingsPreferences) => void;
+  onChange: (preferences: SettingsPreferences) => Promise<void> | void;
   onClose: () => void;
   onDisconnect: () => Promise<void>;
   availableModels?: string[];
@@ -46,6 +46,7 @@ export function SettingsScreen({
   const [exaKey, setExaKey] = useState("");
   const [providerStatus, setProviderStatus] = useState<string | null>(null);
   const [cacheStatus, setCacheStatus] = useState<string | null>(null);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const onCloseRef = useRef(onClose);
   const titleId = useId();
@@ -116,6 +117,14 @@ export function SettingsScreen({
     }
   };
 
+  const savePreferences = (next: SettingsPreferences) => {
+    setSaveStatus("saving");
+    void Promise.resolve(onChange(next)).then(
+      () => setSaveStatus("saved"),
+      () => setSaveStatus("error"),
+    );
+  };
+
   return (
     <div
       ref={dialogRef}
@@ -149,7 +158,7 @@ export function SettingsScreen({
                 type="button"
                 aria-pressed={preferences.mode === mode}
                 className={preferences.mode === mode ? "selected" : undefined}
-                onClick={() => onChange({ ...preferences, mode })}
+                onClick={() => savePreferences({ ...preferences, mode })}
                 key={mode}
               >
                 {label}
@@ -194,7 +203,7 @@ export function SettingsScreen({
               id="analysis-model"
               value={preferences.model}
               onChange={(event) =>
-                onChange({
+                savePreferences({
                   ...preferences,
                   model: event.target.value as AnalysisModel,
                 })
@@ -319,7 +328,7 @@ export function SettingsScreen({
                 aria-pressed={preferences.reasoningEffort === effort.value}
                 className={preferences.reasoningEffort === effort.value ? "selected" : undefined}
                 onClick={() =>
-                  onChange({
+                  savePreferences({
                     ...preferences,
                     reasoningEffort: effort.value,
                   })
@@ -362,7 +371,15 @@ export function SettingsScreen({
           ) : null}
         </section>
 
-        <p className="settings-saved">Changes are saved automatically.</p>
+        <p className="settings-saved" role="status" aria-live="polite">
+          {saveStatus === "saving"
+            ? "Saving changes…"
+            : saveStatus === "saved"
+              ? "Changes saved."
+              : saveStatus === "error"
+                ? "Could not save changes. Your previous settings were restored."
+                : "Changes save automatically."}
+        </p>
       </main>
     </div>
   );

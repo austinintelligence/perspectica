@@ -45,6 +45,7 @@ export interface IndexedArticleSummary {
 }
 
 export interface ResearchProgress {
+  candidateCount: number;
   completedMissions: number;
   totalMissions: number;
   acceptedSources: number;
