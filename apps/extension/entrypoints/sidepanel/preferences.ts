@@ -2,7 +2,9 @@ import type {
   AnalysisModel,
   AnalysisPreferences,
   AnalysisReasoningEffort,
+  ResearchDepth,
 } from "@perspectica/contracts";
+import { researchProfileFor } from "@perspectica/contracts";
 
 export const DEFAULT_ANALYSIS_PREFERENCES: AnalysisPreferences = {
   model: "gpt-5.6-luna",
@@ -39,3 +41,24 @@ export const REASONING_EFFORTS: ReadonlyArray<{
   { value: "medium", label: "Medium" },
   { value: "high", label: "High" },
 ];
+
+export function recommendedInferenceForDepth(
+  depth: ResearchDepth,
+): Pick<AnalysisPreferences, "model" | "reasoningEffort"> {
+  const profile = researchProfileFor(depth);
+  return {
+    model: profile.defaultModel,
+    reasoningEffort: profile.defaultReasoningEffort,
+  };
+}
+
+export function usesCustomInference(
+  depth: ResearchDepth,
+  preferences: Pick<AnalysisPreferences, "model" | "reasoningEffort">,
+): boolean {
+  const recommended = recommendedInferenceForDepth(depth);
+  return (
+    preferences.model !== recommended.model ||
+    preferences.reasoningEffort !== recommended.reasoningEffort
+  );
+}

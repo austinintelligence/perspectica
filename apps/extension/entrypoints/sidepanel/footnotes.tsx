@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { ReaderCopy } from "@perspectica/contracts";
+import { normalizeCanonicalUrl, type ReaderCopy } from "@perspectica/contracts";
 
 export interface CitationTarget {
   id: string;
@@ -17,15 +17,7 @@ export interface FootnoteEntry {
 }
 
 export function canonicalCitationKey(value: string): string {
-  try {
-    const url = new URL(value);
-    url.hash = "";
-    url.hostname = url.hostname.toLocaleLowerCase("en-US");
-    url.pathname = url.pathname.replace(/\/+$/, "") || "/";
-    return url.toString();
-  } catch {
-    return value.trim();
-  }
+  return normalizeCanonicalUrl(value) ?? value.trim();
 }
 
 export function buildFootnoteLedger(
@@ -54,10 +46,19 @@ export function acceptedReaderCopy(
   copy: ReaderCopy,
   citations: ReadonlyMap<string, CitationTarget>,
 ): ReaderCopy | null {
-  const findings = copy.findings.filter((finding) =>
-    finding.citationIds.some((id) => citations.has(id)),
+  const findings = copy.findings.filter(
+    (finding) =>
+      finding.citationIds.length > 0 && finding.citationIds.every((id) => citations.has(id)),
   );
-  return findings.length > 0 ? { ...copy, findings } : null;
+  if (findings.length === 0) return null;
+  return {
+    ...copy,
+    lead:
+      findings.length === copy.findings.length
+        ? copy.lead
+        : "The verified findings are summarized below.",
+    findings,
+  };
 }
 
 function scopeId(scope: string): string {

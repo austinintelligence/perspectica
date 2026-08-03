@@ -36,7 +36,7 @@ export type ExaCredential = z.infer<typeof ExaCredentialSchema>;
 
 const AnalysisHistorySchema = z.array(z.unknown()).max(10);
 
-export type VaultPurpose = "chatgpt" | "exa" | "analysis";
+export type VaultPurpose = "chatgpt" | "exa" | "analysis" | "analysis-resume";
 
 export class MissingVaultKeyError extends Error {
   constructor() {
@@ -181,7 +181,12 @@ export class CredentialVault {
   }
 
   async clear(): Promise<void> {
-    await Promise.all([this.remove("chatgpt"), this.remove("exa"), this.remove("analysis")]);
+    await Promise.all([
+      this.remove("chatgpt"),
+      this.remove("exa"),
+      this.remove("analysis"),
+      this.remove("analysis-resume"),
+    ]);
     await this.keyStore.remove(KEY_ID);
   }
 

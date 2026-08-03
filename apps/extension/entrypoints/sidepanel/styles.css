@@ -205,9 +205,9 @@ a:hover {
 
 .brand-action {
   display: grid;
-  width: 40px;
-  height: 40px;
-  padding: 9px;
+  width: 44px;
+  height: 44px;
+  padding: 10px;
   border: 1px solid rgb(61 99 140 / 24%);
   border-radius: 999px;
   background: rgb(255 255 255 / 22%);
@@ -237,9 +237,9 @@ a:hover {
 }
 
 .brand-header.is-compact .brand-action {
-  width: 34px;
-  height: 34px;
-  padding: 8px;
+  width: 44px;
+  height: 44px;
+  padding: 10px;
 }
 
 .brand-action:hover {
@@ -268,6 +268,7 @@ a:hover {
 }
 
 .masthead-menu button {
+  min-height: 44px;
   padding: 9px 11px;
   border: 0;
   border-radius: 6px;
@@ -334,7 +335,7 @@ a:hover {
 .running-main {
   max-width: 520px;
   margin: 0 auto;
-  padding: clamp(104px, 17vh, 156px) 30px 52px;
+  padding: clamp(76px, 10vh, 108px) 30px 52px;
 }
 
 .analyze-screen h1,
@@ -343,7 +344,7 @@ a:hover {
   margin: 16px 0 0;
   color: var(--ink);
   font-family: var(--font-serif);
-  font-size: clamp(2.6rem, 12vw, 4.1rem);
+  font-size: clamp(2.15rem, 9.5vw, 3.45rem);
   font-weight: 400;
   letter-spacing: -0.055em;
   line-height: 0.98;
@@ -380,6 +381,13 @@ a:hover {
   line-height: 1.45;
 }
 
+.analyze-disabled-reason {
+  margin: 14px 0 0;
+  color: #9a3126;
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
 .analyze-boundary strong {
   color: var(--ink);
   font-size: 0.78rem;
@@ -414,22 +422,56 @@ a:hover {
 }
 
 .analysis-progress {
-  display: grid;
   max-width: 520px;
-  align-items: center;
-  grid-template-columns: auto minmax(0, 1fr);
-  column-gap: 12px;
-  row-gap: 8px;
   margin: -2px auto 28px;
   padding: 0 28px;
 }
 
-.analysis-progress-dot {
-  width: 11px;
-  height: 11px;
-  align-self: start;
-  margin-top: 4px;
+.analysis-progress-timeline {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  gap: 0;
+}
+
+.analysis-progress-step {
+  position: relative;
+  display: grid;
+  min-height: 58px;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 13px;
+}
+
+.analysis-progress-step:not(:last-child)::after {
+  position: absolute;
+  top: 21px;
+  bottom: -4px;
+  left: 6px;
+  width: 1px;
+  background: rgb(72 109 148 / 24%);
+  content: "";
+}
+
+.analysis-progress-marker {
+  position: relative;
+  z-index: 1;
+  width: 13px;
+  height: 13px;
+  margin-top: 3px;
+  border: 1px solid rgb(72 109 148 / 45%);
   border-radius: 999px;
+  background: rgb(244 248 252 / 92%);
+}
+
+.analysis-progress-step-complete .analysis-progress-marker {
+  border-color: var(--gold);
+  background: var(--gold);
+  box-shadow: inset 0 0 0 3px rgb(255 255 255 / 80%);
+}
+
+.analysis-progress-step-active .analysis-progress-marker {
+  border-color: var(--gold);
   background: var(--gold);
   box-shadow: 0 0 0 6px rgb(212 155 8 / 10%);
   animation: progress-dot 1.8s ease-out infinite;
@@ -448,7 +490,7 @@ a:hover {
 
 .analysis-progress-copy strong {
   color: var(--ink);
-  font-size: 0.84rem;
+  font-size: 0.78rem;
   font-weight: 600;
 }
 
@@ -460,41 +502,41 @@ a:hover {
   letter-spacing: 0.02em;
 }
 
-.analysis-progress-track {
-  display: block;
-  grid-column: 2;
-  height: 1px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: rgb(72 109 148 / 20%);
+.analysis-progress-step-waiting .analysis-progress-copy {
+  opacity: 0.52;
 }
 
-.analysis-progress-track > span {
-  display: block;
-  width: 100%;
-  height: 100%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, #d49b08, #efbd4d);
-  transform-origin: left center;
+.analysis-progress-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule);
+  gap: 16px;
 }
 
-.analysis-progress-indicator {
-  transform: scaleX(0.34);
+.analysis-progress-elapsed {
+  color: var(--muted);
+  font-size: 0.62rem;
+  letter-spacing: 0.03em;
 }
 
 .analysis-progress-cancel {
-  grid-column: 2;
-  justify-self: start;
-  padding: 2px 0;
-  border: 0;
-  border-bottom: 1px solid currentcolor;
-  background: transparent;
-  color: var(--muted);
+  min-height: 44px;
+  padding: 8px 15px;
+  border: 1px solid rgb(72 109 148 / 38%);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 50%);
+  color: var(--body);
   cursor: pointer;
-  font-size: 0.63rem;
+  font-size: 0.66rem;
+  font-weight: 650;
 }
 
 .analysis-progress-cancel:hover {
+  border-color: rgb(72 109 148 / 65%);
+  background: rgb(255 255 255 / 72%);
   color: var(--ink);
 }
 
@@ -1043,6 +1085,25 @@ blockquote footer {
   color: #9c312b;
 }
 
+.section-error p {
+  margin: 0 0 10px;
+}
+
+.section-retry {
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid currentcolor;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.72rem;
+}
+
+.compass-retry {
+  margin: 10px 0 0 48px;
+}
+
 .source-result {
   padding: 8px 0 12px;
 }
@@ -1099,6 +1160,7 @@ blockquote footer {
 
 .copy-logs-button {
   min-width: 112px;
+  min-height: 44px;
   padding: 8px 14px;
   border: 1px solid rgb(72 109 148 / 34%);
   border-radius: 999px;
@@ -1128,6 +1190,7 @@ blockquote footer {
 }
 
 .clear-logs-button {
+  min-height: 44px;
   margin-top: 9px;
   padding: 2px 0;
   border: 0;
@@ -1196,6 +1259,7 @@ blockquote footer {
 }
 
 .page-error button {
+  min-height: 44px;
   padding: 8px 12px;
   border: 1px solid #a64943;
   border-radius: 4px;
@@ -1226,6 +1290,7 @@ blockquote footer {
 }
 
 .page-notice button {
+  min-height: 44px;
   padding: 8px 12px;
   border: 1px solid rgb(72 109 148 / 34%);
   border-radius: 4px;
@@ -1550,6 +1615,7 @@ blockquote footer {
 
 .provider-options button {
   display: grid;
+  min-height: 44px;
   padding: 16px;
   border: 1px solid rgb(67 103 142 / 24%);
   border-radius: 9px;
@@ -1642,7 +1708,7 @@ blockquote footer {
 }
 
 .settings-provider-key .provider-remove-key {
-  min-height: 36px;
+  min-height: 44px;
   grid-column: 1 / -1;
   justify-self: start;
   border-color: rgb(162 57 44 / 38%);
@@ -1650,12 +1716,74 @@ blockquote footer {
 }
 
 .settings-layer {
-  position: fixed;
-  z-index: var(--z-modal);
-  inset: 0;
-  overflow-y: auto;
+  position: relative;
+  min-height: 100dvh;
   background: transparent;
   animation: settings-enter 180ms ease-out both;
+}
+
+.advanced-settings-disclosure {
+  margin-top: 20px;
+  border-top: 1px solid var(--rule);
+}
+
+.advanced-settings-disclosure > summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 15px 0 10px;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.settings-custom-label {
+  margin-inline-start: auto;
+  color: var(--blue-700);
+  font-family: var(--font-sans);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.settings-lock-note {
+  margin-top: 10px;
+}
+
+.about-team {
+  margin-top: 28px;
+  padding-top: 20px;
+  border-top: 1px solid var(--rule);
+}
+
+.about-team h2 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.68rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.about-team ul {
+  display: grid;
+  margin: 14px 0 0;
+  padding: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 18px;
+  color: var(--body);
+  font-size: 0.72rem;
+  list-style: none;
+}
+
+.depth-control:disabled,
+.preference-section :disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
 }
 
 .settings-main {
@@ -1688,7 +1816,7 @@ blockquote footer {
 }
 
 .settings-tabs button {
-  min-height: 43px;
+  min-height: 44px;
   padding: 9px 6px;
   border: 0;
   border-bottom: 2px solid transparent;
@@ -1725,7 +1853,7 @@ blockquote footer {
 
 .depth-slider {
   width: 100%;
-  height: 28px;
+  height: 44px;
   margin: 0;
   accent-color: var(--blue);
   cursor: pointer;
@@ -1792,6 +1920,7 @@ blockquote footer {
 }
 
 .settings-secondary-nav button {
+  min-height: 44px;
   padding: 4px 0;
   border: 0;
   border-bottom: 1px solid currentcolor;
@@ -1804,6 +1933,11 @@ blockquote footer {
 .preference-section {
   padding: 26px 0 25px;
   border-bottom: 1px solid var(--rule);
+}
+
+.preference-section > button {
+  min-height: 44px;
+  padding: 8px 12px;
 }
 
 .preference-label {

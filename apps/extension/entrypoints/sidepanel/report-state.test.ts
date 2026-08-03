@@ -108,7 +108,7 @@ describe("reducePipelineEvent", () => {
           completedAt: emittedAt,
           durationMs: 1_000,
           status: "partial",
-          failedSections: ["supporting"],
+          failedSections: ["supporting", "works-cited"],
           acceptedSources: 1,
           acceptedAssertions: 1,
         },
@@ -116,6 +116,7 @@ describe("reducePipelineEvent", () => {
     );
     expect(state.phase).toBe("partial");
     expect(state.supporting.status).toBe("error");
+    expect(state.sourceList.status).toBe("error");
   });
 
   it("ignores events from an older analysis stream", () => {
@@ -130,5 +131,190 @@ describe("reducePipelineEvent", () => {
     );
     expect(state.analysis?.analysisId).toBe("analysis-new");
     expect(state.phase).toBe("index");
+  });
+
+  it("isolates streamed section failures for targeted retry", () => {
+    let state = reducePipelineEvent(beginExtraction(), started());
+    state = reducePipelineEvent(
+      state,
+      event({
+        type: "section.failed",
+        data: {
+          section: "journalist-context",
+          message: "The journalist research lane could not be verified.",
+          retryable: true,
+        },
+      }),
+    );
+
+    expect(state.journalistContext).toMatchObject({
+      status: "error",
+      error: "The journalist research lane could not be verified.",
+    });
+    expect(state.failedSections).toEqual(["journalist-context"]);
+    expect(state.supporting.status).toBe("loading");
+  });
+
+  it("prunes duplicate evidence lanes using canonical source URLs", () => {
+    let state = reducePipelineEvent(beginExtraction(), started());
+    state = reducePipelineEvent(
+      state,
+      event({
+        type: "section.ready",
+        data: {
+          section: "supporting",
+          data: {
+            status: "ready",
+            summary: "Supporting evidence.",
+            sources: [
+              {
+                id: "supporting-source",
+                claimId: "claim-1",
+                title: "Supporting source",
+                publication: "Example",
+                publishedAt: emittedAt,
+                relationship: "supports",
+                relationshipExplanation: "Supports the claim.",
+                url: "https://example.com/story?utm_source=feed",
+                sourceType: "independent-reporting",
+                publicationContext: null,
+                excerpt: "A supporting excerpt.",
+              },
+            ],
+            readerCopy: {
+              lead: "This is supported.",
+              findings: [
+                { id: "finding-1", text: "Supported.", citationIds: ["supporting-source"] },
+              ],
+            },
+          },
+        },
+      }),
+    );
+    state = reducePipelineEvent(
+      state,
+      event({
+        type: "section.ready",
+        data: {
+          section: "additional-context",
+          data: {
+            status: "ready",
+            summary: "Additional context.",
+            sources: [
+              {
+                id: "duplicate-source",
+                claimId: null,
+                title: "Duplicate source",
+                publication: "Example",
+                publishedAt: emittedAt,
+                relationship: "adds-context",
+                relationshipExplanation: "Adds context.",
+                url: "https://example.com/story#details",
+                sourceType: "commentary",
+                publicationContext: null,
+                excerpt: "Duplicate context.",
+              },
+            ],
+          },
+        },
+      }),
+    );
+
+    expect(state.additionalContext.status).toBe("empty");
+    expect(state.additionalContext.data?.sources).toHaveLength(0);
+    expect(state.supporting.data?.readerCopy?.findings).toHaveLength(1);
+  });
+
+  it("rebuilds reader copy from only the sources that remain after pruning", () => {
+    let state = reducePipelineEvent(beginExtraction(), started());
+    state = reducePipelineEvent(
+      state,
+      event({
+        type: "section.ready",
+        data: {
+          section: "supporting",
+          data: {
+            status: "ready",
+            summary: "Both the retained and later-pruned claims are supported.",
+            sources: [
+              {
+                id: "retained-source",
+                claimId: "claim-1",
+                title: "Retained source",
+                publication: "Example",
+                publishedAt: emittedAt,
+                relationship: "supports",
+                relationshipExplanation: "Independent reporting supports the retained claim.",
+                url: "https://example.com/retained",
+                sourceType: "independent-reporting",
+                publicationContext: null,
+                excerpt: "Retained excerpt.",
+              },
+              {
+                id: "later-pruned-source",
+                claimId: "claim-2",
+                title: "Later-pruned source",
+                publication: "Example",
+                publishedAt: emittedAt,
+                relationship: "supports",
+                relationshipExplanation: "This stale claim must disappear.",
+                url: "https://example.com/shared",
+                sourceType: "independent-reporting",
+                publicationContext: null,
+                excerpt: "Pruned excerpt.",
+              },
+            ],
+            readerCopy: {
+              lead: "Both claims appear in this lead.",
+              findings: [
+                { id: "kept", text: "Retained finding.", citationIds: ["retained-source"] },
+                {
+                  id: "removed",
+                  text: "Removed finding.",
+                  citationIds: ["later-pruned-source"],
+                },
+              ],
+            },
+          },
+        },
+      }),
+    );
+    state = reducePipelineEvent(
+      state,
+      event({
+        type: "section.ready",
+        data: {
+          section: "contradicting",
+          data: {
+            status: "ready",
+            summary: "Qualification.",
+            sources: [
+              {
+                id: "contradicting-source",
+                claimId: "claim-2",
+                title: "Contradicting source",
+                publication: "Example",
+                publishedAt: emittedAt,
+                relationship: "contradicts",
+                relationshipExplanation: "The source materially qualifies the second claim.",
+                url: "https://example.com/shared?utm_source=test",
+                sourceType: "independent-reporting",
+                publicationContext: null,
+                excerpt: "Contradicting excerpt.",
+              },
+            ],
+          },
+        },
+      }),
+    );
+
+    expect(state.supporting.data?.sources.map((source) => source.id)).toEqual(["retained-source"]);
+    expect(state.supporting.data?.summary).toBe(
+      "Independent reporting supports the retained claim.",
+    );
+    expect(state.supporting.data?.readerCopy).toEqual({
+      lead: "Independent reporting supports the retained claim.",
+      findings: [{ id: "kept", text: "Retained finding.", citationIds: ["retained-source"] }],
+    });
   });
 });

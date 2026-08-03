@@ -49,6 +49,29 @@ describe("canReuseAnalysisJob", () => {
     expect(canReuseAnalysisJob(job(), article, 7, configFingerprint)).toBe(true);
   });
 
+  it("uses the browser tab URL instead of page-supplied canonical metadata", () => {
+    expect(
+      canReuseAnalysisJob(
+        job(),
+        { ...article, canonicalUrl: "https://attacker.example/spoofed" },
+        7,
+        configFingerprint,
+        false,
+        "https://example.com/story",
+      ),
+    ).toBe(true);
+    expect(
+      canReuseAnalysisJob(
+        job(),
+        article,
+        7,
+        configFingerprint,
+        false,
+        "https://example.com/a-different-story",
+      ),
+    ).toBe(false);
+  });
+
   it("does not reuse a same-URL report for a changed article fingerprint", () => {
     expect(
       canReuseAnalysisJob(
@@ -81,6 +104,7 @@ describe("canReuseAnalysisJob", () => {
       createAnalysisConfigFingerprint({ ...preferences, mode: "deep" }),
       createAnalysisConfigFingerprint({ ...preferences, depth: "verified" }),
       createAnalysisConfigFingerprint({ ...preferences, searchProvider: "chatgpt" }),
+      createAnalysisConfigFingerprint(preferences, "exa:different-key"),
     ];
 
     for (const fingerprint of changed) {

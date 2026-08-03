@@ -24,6 +24,7 @@ interface ResearchDepthControlProps {
   onChange?: (depth: ResearchDepth) => void;
   id?: string;
   compact?: boolean;
+  disabled?: boolean;
 }
 
 export function ResearchDepthControl({
@@ -31,6 +32,7 @@ export function ResearchDepthControl({
   onChange,
   id = "research-depth",
   compact = false,
+  disabled = false,
 }: ResearchDepthControlProps) {
   const index = Math.max(
     0,
@@ -38,7 +40,10 @@ export function ResearchDepthControl({
   );
   const selected = RESEARCH_DEPTH_OPTIONS[index] ?? RESEARCH_DEPTH_OPTIONS[1]!;
   return (
-    <fieldset className={`depth-control${compact ? " depth-control-compact" : ""}`}>
+    <fieldset
+      className={`depth-control${compact ? " depth-control-compact" : ""}`}
+      disabled={disabled}
+    >
       <legend className="preference-label">Research depth</legend>
       <input
         id={id}

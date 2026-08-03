@@ -8,6 +8,7 @@ import { AnalysisPlanSchema, type AnalysisPlan } from "@perspectica/contracts/re
 import type { ArticleDocument } from "@perspectica/contracts";
 import type { AnalysisBudget, AnalysisArtifacts } from "@perspectica/intelligence";
 import type { PipelineTelemetry } from "@perspectica/intelligence";
+import { IndexedDbCryptoKeyStore, type CryptoKeyStore } from "./indexed-db-key-store";
 
 export type PersistedAnalysisArtifacts = Omit<AnalysisArtifacts, "ledger"> & {
   ledger: SourceLedgerSnapshot;
@@ -20,12 +21,23 @@ export interface AnalysisArtifactStore {
   clearAll(): Promise<void>;
 }
 
-interface ArtifactRecord {
+interface LegacyArtifactRecord {
   jobId: string;
   runToken: string;
   expiresAt: number;
   artifacts: PersistedAnalysisArtifacts;
 }
+
+interface EncryptedArtifactRecord {
+  jobId: string;
+  runToken: string;
+  expiresAt: number;
+  version: 1;
+  iv: string;
+  ciphertext: string;
+}
+
+type ArtifactRecord = LegacyArtifactRecord | EncryptedArtifactRecord;
 
 interface MemoryRecord {
   expiresAt: number;
@@ -36,6 +48,22 @@ const DATABASE_NAME = "perspectica-analysis-artifacts-v1";
 const DATABASE_VERSION = 1;
 const STORE_NAME = "artifacts";
 const MAX_ARTIFACT_BYTES = 25 * 1024 * 1024;
+const ARTIFACT_KEY_ID = "perspectica-analysis-artifact-key-v1";
+
+function encodeBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function decodeBase64(value: string): Uint8Array {
+  const binary = atob(value);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
 
 function key(jobId: string, runToken: string): string {
   return `${jobId}:${runToken}`;
@@ -72,6 +100,103 @@ function restoreable(value: PersistedAnalysisArtifacts): PersistedAnalysisArtifa
 export class IndexedDbAnalysisArtifactStore implements AnalysisArtifactStore {
   private readonly memory = new Map<string, MemoryRecord>();
   private dbPromise: Promise<IDBDatabase | null> | null = null;
+  private keyPromise: Promise<CryptoKey> | null = null;
+
+  constructor(
+    private readonly keyStore: CryptoKeyStore = new IndexedDbCryptoKeyStore(),
+    private readonly cryptoImplementation: Crypto = globalThis.crypto,
+    private readonly runtimeId = typeof chrome === "undefined" ? "perspectica" : chrome.runtime.id,
+  ) {}
+
+  private additionalData(jobId: string, runToken: string): ArrayBuffer {
+    return toArrayBuffer(
+      new TextEncoder().encode(
+        JSON.stringify({ version: 1, runtimeId: this.runtimeId, jobId, runToken }),
+      ),
+    );
+  }
+
+  private async encryptionKey(): Promise<CryptoKey> {
+    const existing = await this.keyStore.get(ARTIFACT_KEY_ID);
+    if (existing) return existing;
+    this.keyPromise ??= (async () => {
+      const raced = await this.keyStore.get(ARTIFACT_KEY_ID);
+      if (raced) return raced;
+      const key = await this.cryptoImplementation.subtle.generateKey(
+        { name: "AES-GCM", length: 256 },
+        false,
+        ["encrypt", "decrypt"],
+      );
+      await this.keyStore.set(ARTIFACT_KEY_ID, key);
+      return key;
+    })().finally(() => {
+      this.keyPromise = null;
+    });
+    return this.keyPromise;
+  }
+
+  private async seal(
+    jobId: string,
+    runToken: string,
+    artifacts: PersistedAnalysisArtifacts,
+  ): Promise<Pick<EncryptedArtifactRecord, "version" | "iv" | "ciphertext">> {
+    const key = await this.encryptionKey();
+    const iv = this.cryptoImplementation.getRandomValues(new Uint8Array(12));
+    const plaintext = new TextEncoder().encode(JSON.stringify(artifacts));
+    const ciphertext = await this.cryptoImplementation.subtle.encrypt(
+      {
+        name: "AES-GCM",
+        iv: toArrayBuffer(iv),
+        additionalData: this.additionalData(jobId, runToken),
+      },
+      key,
+      toArrayBuffer(plaintext),
+    );
+    return {
+      version: 1,
+      iv: encodeBase64(iv),
+      ciphertext: encodeBase64(new Uint8Array(ciphertext)),
+    };
+  }
+
+  private async openRecord(record: EncryptedArtifactRecord): Promise<PersistedAnalysisArtifacts> {
+    const key = await this.encryptionKey();
+    const plaintext = await this.cryptoImplementation.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: toArrayBuffer(decodeBase64(record.iv)),
+        additionalData: this.additionalData(record.jobId, record.runToken),
+      },
+      key,
+      toArrayBuffer(decodeBase64(record.ciphertext)),
+    );
+    return restoreable(
+      JSON.parse(new TextDecoder().decode(plaintext)) as PersistedAnalysisArtifacts,
+    );
+  }
+
+  private async rewriteLegacyRecord(
+    jobId: string,
+    runToken: string,
+    expiresAt: number,
+    artifacts: PersistedAnalysisArtifacts,
+  ): Promise<void> {
+    const db = await this.open();
+    if (!db) return;
+    const encrypted = await this.seal(jobId, runToken, artifacts);
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction(STORE_NAME, "readwrite");
+      transaction.objectStore(STORE_NAME).put({
+        jobId,
+        runToken,
+        expiresAt,
+        ...encrypted,
+      } satisfies EncryptedArtifactRecord);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () =>
+        reject(transaction.error ?? new Error("Could not migrate analysis artifacts."));
+    });
+  }
 
   private open(): Promise<IDBDatabase | null> {
     if (this.dbPromise) return this.dbPromise;
@@ -105,14 +230,15 @@ export class IndexedDbAnalysisArtifactStore implements AnalysisArtifactStore {
     this.memory.set(key(jobId, runToken), { expiresAt, artifacts: value });
     const db = await this.open();
     if (!db) return;
+    const encrypted = await this.seal(jobId, runToken, value);
     await new Promise<void>((resolve, reject) => {
       const transaction = db.transaction(STORE_NAME, "readwrite");
       transaction.objectStore(STORE_NAME).put({
         jobId,
         runToken,
         expiresAt,
-        artifacts: value,
-      } satisfies ArtifactRecord);
+        ...encrypted,
+      } satisfies EncryptedArtifactRecord);
       const cursorRequest = transaction.objectStore(STORE_NAME).openCursor();
       cursorRequest.onsuccess = () => {
         const cursor = cursorRequest.result;
@@ -145,14 +271,18 @@ export class IndexedDbAnalysisArtifactStore implements AnalysisArtifactStore {
         reject(request.error ?? new Error("Could not read analysis artifacts."));
       request.onsuccess = () => resolve((request.result as ArtifactRecord | undefined) ?? null);
     });
-    if (!record?.artifacts || record.expiresAt <= Date.now()) {
+    if (!record || record.expiresAt <= Date.now()) {
       if (record) {
         await this.clear(jobId, runToken);
       }
       return null;
     }
-    const value = restoreable(record.artifacts);
+    const value =
+      "artifacts" in record ? restoreable(record.artifacts) : await this.openRecord(record);
     this.memory.set(cacheKey, { expiresAt: record.expiresAt, artifacts: value });
+    if ("artifacts" in record) {
+      await this.rewriteLegacyRecord(jobId, runToken, record.expiresAt, value);
+    }
     return structuredClone(value);
   }
 

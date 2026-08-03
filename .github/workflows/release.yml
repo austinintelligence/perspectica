@@ -1,0 +1,211 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  extension:
+    name: Verify and package extension
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 9.15.4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify release tag and package versions
+        env:
+          TAG: ${{ github.ref_name }}
+        run: node scripts/check-release-version.mjs "$TAG"
+
+      - name: Audit production dependencies
+        run: pnpm audit --prod --audit-level=high
+
+      - name: Verify and package production extension
+        run: pnpm verify:release
+
+      - name: Verify generated manifest version
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          expected="${TAG#v}"
+          EXPECTED_VERSION="$expected" node <<'NODE'
+          const fs = require("node:fs");
+          const expected = process.env.EXPECTED_VERSION;
+          const manifest = JSON.parse(
+            fs.readFileSync("apps/extension/.output/chrome-mv3/manifest.json", "utf8"),
+          );
+          if (manifest.version !== expected) {
+            throw new Error(
+              `generated manifest version ${manifest.version} does not match ${expected}`,
+            );
+          }
+          console.log(`Generated manifest version ${expected} matches release tag.`);
+          NODE
+
+      - name: Prepare versioned extension artifact
+        id: extension
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          source_zip="$(find apps/extension/.output -maxdepth 1 -type f -name '*.zip' -print -quit)"
+          test -n "$source_zip"
+          zip_name="perspectica-extension-${TAG}.zip"
+          cp "$source_zip" "release/$zip_name"
+          echo "zip_name=$zip_name" >> "$GITHUB_OUTPUT"
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@d94f46e13c6c62f59525ac9a1e147a99dc0b9bf5 # v0.17.0
+        with:
+          path: release/${{ steps.extension.outputs.zip_name }}
+          format: spdx-json
+          output-file: release/perspectica-sbom.spdx.json
+
+      - name: Upload extension artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-extension
+          path: release/
+          if-no-files-found: error
+          retention-days: 14
+
+  installer-macos:
+    name: Build universal macOS helper
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Add Rust targets
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
+      - name: Test helper
+        run: cargo test --manifest-path tools/installer/Cargo.toml --locked
+
+      - name: Build universal helper
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cargo build --manifest-path tools/installer/Cargo.toml --locked --release --target x86_64-apple-darwin
+          cargo build --manifest-path tools/installer/Cargo.toml --locked --release --target aarch64-apple-darwin
+          mkdir -p release/perspectica-installer-macos
+          lipo -create \
+            tools/installer/target/x86_64-apple-darwin/release/perspectica-installer \
+            tools/installer/target/aarch64-apple-darwin/release/perspectica-installer \
+            -output release/perspectica-installer-macos/perspectica-installer
+          chmod +x release/perspectica-installer-macos/perspectica-installer
+          cp tools/installer/README.md release/perspectica-installer-macos/README.md
+          tar -C release -czf "release/perspectica-installer-macos-universal-${TAG}.tar.gz" perspectica-installer-macos
+          rm -rf release/perspectica-installer-macos
+
+      - name: Upload macOS helper
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-installer-macos
+          path: release/
+          if-no-files-found: error
+          retention-days: 14
+
+  installer-windows:
+    name: Build Windows helper
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Test helper
+        run: cargo test --manifest-path tools/installer/Cargo.toml --locked
+
+      - name: Build Windows helper
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          cargo build --manifest-path tools/installer/Cargo.toml --locked --release
+          New-Item -ItemType Directory -Force release/perspectica-installer-windows | Out-Null
+          Copy-Item tools/installer/target/release/perspectica-installer.exe release/perspectica-installer-windows/
+          Copy-Item tools/installer/README.md release/perspectica-installer-windows/README.md
+          Compress-Archive -Path release/perspectica-installer-windows/* -DestinationPath "release/perspectica-installer-windows-x64-$env:TAG.zip"
+          Remove-Item -Recurse -Force release/perspectica-installer-windows
+
+      - name: Upload Windows helper
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-installer-windows
+          path: release/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Attest and publish release
+    needs: [extension, installer-macos, installer-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          path: release
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          cd release
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            | sed 's#  \./#  #' > SHA256SUMS
+
+      - name: Attest release files
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: release/*
+
+      - name: Upload release evidence bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: perspectica-${{ github.ref_name }}-release-evidence
+          path: release/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" release/* --verify-tag --generate-notes --title "Perspectica $TAG"

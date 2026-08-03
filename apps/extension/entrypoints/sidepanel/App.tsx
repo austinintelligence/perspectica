@@ -1,5 +1,7 @@
 import {
+  lazy,
   memo,
+  Suspense,
   useCallback,
   useEffect,
   useRef,
@@ -27,11 +29,10 @@ import { ChatGptConnectionScreen, usePerspecticaChatGpt } from "./ChatGptConnect
 import { TargetIcon } from "./Icons";
 import { ProgressiveText } from "./ProgressiveText";
 import { Section } from "./Section";
-import { SettingsScreen } from "./SettingsScreen";
 import type { SettingsPreferences } from "./SettingsScreen";
 import { SearchSetupScreen } from "./SearchSetupScreen";
 import { ResearchDepthControl } from "./DepthControl";
-import { DEFAULT_ANALYSIS_PREFERENCES } from "./preferences";
+import { DEFAULT_ANALYSIS_PREFERENCES, recommendedInferenceForDepth } from "./preferences";
 import {
   acceptedReaderCopy,
   buildFootnoteLedger,
@@ -64,6 +65,7 @@ import {
   extensionMode,
   clearAnalysisLogs,
   getAnalysisLogs,
+  getArticlePreview,
   getRuntimeState,
   isResumableJob,
   streamAnalysis,
@@ -73,11 +75,33 @@ import {
 } from "./api";
 import { subscribeRuntimePush } from "../../src/runtime/client";
 import type {
+  ArticlePreview,
   ExtensionPreferences,
   RuntimeState,
   SearchProviderKind,
 } from "../../src/runtime/messages";
 import { PERSPECTICA_RUNTIME_PROTOCOL } from "../../src/runtime/messages";
+
+const SettingsScreen = lazy(async () => {
+  const module = await import("./SettingsScreen");
+  return { default: module.SettingsScreen };
+});
+
+function RouteLoadingFallback() {
+  return (
+    <main className="runtime-state-screen atmosphere-page" aria-live="polite">
+      <p className="eyebrow">Perspectica</p>
+      <h1 data-route-heading tabIndex={-1}>
+        Opening view…
+      </h1>
+      <div className="section-loading" aria-hidden="true">
+        <span />
+        <span />
+        <span />
+      </div>
+    </main>
+  );
+}
 
 async function copyText(text: string): Promise<boolean> {
   try {
@@ -402,6 +426,8 @@ function SourceListBody({ result }: { result: SourceListResult }) {
 
 interface AnalyzeScreenProps {
   metadata: ArticleMetadataForPreview | null;
+  previewStatus?: "loading" | "ready" | "error";
+  previewError?: string | null;
   onAnalyze: () => void;
   onOpenSettings: () => void;
   menuItems?: ReadonlyArray<{ label: string; onSelect: () => void }>;
@@ -419,6 +445,8 @@ type ArticleMetadataForPreview = {
 
 export function AnalyzeScreen({
   metadata,
+  previewStatus = metadata ? "ready" : "loading",
+  previewError = null,
   onAnalyze,
   onOpenSettings,
   menuItems,
@@ -461,8 +489,19 @@ export function AnalyzeScreen({
           id="analyze-research-depth"
           compact
         />
-        <button type="button" className="chatgpt-action analyze-action" onClick={onAnalyze}>
-          Analyze article
+        {previewError ? (
+          <p id="analyze-preview-error" className="analyze-disabled-reason" role="alert">
+            {previewError}
+          </p>
+        ) : null}
+        <button
+          type="button"
+          className="chatgpt-action analyze-action"
+          onClick={onAnalyze}
+          disabled={previewStatus !== "ready"}
+          aria-describedby={previewError ? "analyze-preview-error" : undefined}
+        >
+          {previewStatus === "loading" ? "Reading article…" : "Analyze article"}
         </button>
       </main>
     </div>
@@ -475,6 +514,13 @@ export function DiagnosticsScreen({ onBack }: { onBack: () => void }) {
   const [manual, setManual] = useState<string | null>(null);
   const textRef = useRef<HTMLTextAreaElement | null>(null);
   const copy = async () => {
+    if (
+      !window.confirm(
+        "Copy this run's support log? It may include article excerpts, research queries, and model output. Credentials and authentication values are redacted.",
+      )
+    ) {
+      return;
+    }
     setStatus("copying");
     try {
       const logs = await getAnalysisLogs();
@@ -512,8 +558,8 @@ export function DiagnosticsScreen({ onBack }: { onBack: () => void }) {
           Diagnostics
         </h1>
         <p className="connection-lede">
-          Copy a sanitized activity log when you need help. Article text and credentials are not
-          included.
+          Copy a sanitized activity log when you need help. It may include article excerpts,
+          searches, and model output; credentials and authentication values are redacted.
         </p>
         <div className="diagnostics-actions">
           <button type="button" className="chatgpt-action" onClick={() => void copy()}>
@@ -566,6 +612,15 @@ export function AboutScreen({ onBack }: { onBack: () => void }) {
           Read with context.
         </h1>
         <p>An editorial lens for understanding how reporting is framed, supported, and situated.</p>
+        <section className="about-team" aria-labelledby="about-team-title">
+          <h2 id="about-team-title">Built by</h2>
+          <ul>
+            <li>Austin Morgan</li>
+            <li>Lathik Ram C.</li>
+            <li>Mathew Estis</li>
+            <li>Jordan Allen</li>
+          </ul>
+        </section>
         <p className="settings-saved">Research stays bounded to the article you choose.</p>
       </main>
     </div>
@@ -579,6 +634,7 @@ interface AnalysisReportProps {
   autoStart?: boolean;
   screen?: "controller" | "running" | "report";
   onPhaseChange?: (phase: ReportPhase) => void;
+  runRequest?: number;
 }
 
 export function PartialReportNotice({ onRetry }: { onRetry: () => void }) {
@@ -614,32 +670,60 @@ function useReportSection<K extends ReportSectionKey>(store: ReportStore, sectio
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
-const ConnectedCompass = memo(function ConnectedCompass({ store }: { store: ReportStore }) {
+const ConnectedCompass = memo(function ConnectedCompass({
+  store,
+  onRetry,
+}: {
+  store: ReportStore;
+  onRetry?: () => void;
+}) {
   const section = useReportSection(store, "compass");
   return section.data ? (
     <>
       <Compass result={section.data} />
-      {section.status === "error" ? <ProvisionalCompassWarning /> : null}
+      {section.status === "error" ? (
+        <>
+          <ProvisionalCompassWarning />
+          {onRetry ? (
+            <button className="section-retry compass-retry" type="button" onClick={onRetry}>
+              Retry Political Spectrum
+            </button>
+          ) : null}
+        </>
+      ) : null}
     </>
   ) : (
-    <div className="compass-placeholder">
-      <TargetIcon />
-      <span>
-        <small>Political Spectrum</small>
-        <strong>{section.status === "error" ? "Unavailable" : "Finding placement…"}</strong>
-      </span>
-    </div>
+    <>
+      <div className="compass-placeholder">
+        <TargetIcon />
+        <span>
+          <small>Political Spectrum</small>
+          <strong>{section.status === "error" ? "Unavailable" : "Finding placement…"}</strong>
+        </span>
+      </div>
+      {section.status === "error" && onRetry ? (
+        <button className="section-retry compass-retry" type="button" onClick={onRetry}>
+          Retry Political Spectrum
+        </button>
+      ) : null}
+    </>
   );
 });
 
-const ConnectedBias = memo(function ConnectedBias({ store }: { store: ReportStore }) {
+const ConnectedBias = memo(function ConnectedBias({
+  store,
+  onRetry,
+}: {
+  store: ReportStore;
+  onRetry?: () => void;
+}) {
   const section = useReportSection(store, "bias");
   const data = section.data;
   const citations = new Map(
     (data?.citations ?? []).map((citation: ReaderCitation) => [citation.id, citation]),
   );
   return (
-    <Section id="bias" title="Bias" status={section.status} error={section.error}>
+    <Section id="bias" title="Bias" status={section.status} error={section.error} onRetry={onRetry}>
       {data ? (
         data.readerCopy && acceptedReaderCopy(data.readerCopy, citations) ? (
           <ReaderCopyBody
@@ -673,8 +757,10 @@ const ConnectedBias = memo(function ConnectedBias({ store }: { store: ReportStor
 
 const ConnectedJournalistContext = memo(function ConnectedJournalistContext({
   store,
+  onRetry,
 }: {
   store: ReportStore;
+  onRetry?: () => void;
 }) {
   const section = useReportSection(store, "journalistContext");
   return (
@@ -683,6 +769,7 @@ const ConnectedJournalistContext = memo(function ConnectedJournalistContext({
       title="Journalist Context"
       status={section.status}
       error={section.error}
+      onRetry={onRetry}
     >
       {section.data ? <JournalistBody result={section.data} /> : null}
     </Section>
@@ -694,15 +781,17 @@ const ConnectedEvidence = memo(function ConnectedEvidence({
   section: sectionKey,
   title,
   id,
+  onRetry,
 }: {
   store: ReportStore;
   section: "supporting" | "contradicting";
   title: string;
   id: string;
+  onRetry?: () => void;
 }) {
   const section = useReportSection(store, sectionKey);
   return (
-    <Section id={id} title={title} status={section.status} error={section.error}>
+    <Section id={id} title={title} status={section.status} error={section.error} onRetry={onRetry}>
       {section.data ? <EvidenceBody result={section.data} sectionId={id} /> : null}
     </Section>
   );
@@ -710,8 +799,10 @@ const ConnectedEvidence = memo(function ConnectedEvidence({
 
 const ConnectedAdditionalContext = memo(function ConnectedAdditionalContext({
   store,
+  onRetry,
 }: {
   store: ReportStore;
+  onRetry?: () => void;
 }) {
   const section = useReportSection(store, "additionalContext");
   return (
@@ -720,16 +811,29 @@ const ConnectedAdditionalContext = memo(function ConnectedAdditionalContext({
       title="Additional Context"
       status={section.status}
       error={section.error}
+      onRetry={onRetry}
     >
       {section.data ? <AdditionalContextBody result={section.data} /> : null}
     </Section>
   );
 });
 
-const ConnectedSourceList = memo(function ConnectedSourceList({ store }: { store: ReportStore }) {
+const ConnectedSourceList = memo(function ConnectedSourceList({
+  store,
+  onRetry,
+}: {
+  store: ReportStore;
+  onRetry?: () => void;
+}) {
   const section = useReportSection(store, "sourceList");
   return (
-    <Section id="sources" title="Works Cited" status={section.status} error={section.error}>
+    <Section
+      id="sources"
+      title="Works Cited"
+      status={section.status}
+      error={section.error}
+      onRetry={onRetry}
+    >
       {section.data ? <SourceListBody result={section.data} /> : null}
     </Section>
   );
@@ -742,6 +846,7 @@ function AnalysisReport({
   autoStart = false,
   screen = "report",
   onPhaseChange,
+  runRequest = 0,
 }: AnalysisReportProps) {
   const reportStoreRef = useRef<ReportStore | null>(null);
   reportStoreRef.current ??= new ReportStore();
@@ -755,6 +860,7 @@ function AnalysisReport({
   const abortRef = useRef<AbortController | null>(null);
   const runRef = useRef(0);
   const effectStartedRef = useRef(false);
+  const handledRunRequestRef = useRef(-1);
   const cleanupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const preferencesRef = useRef(preferences);
 
@@ -812,6 +918,13 @@ function AnalysisReport({
     void analyze(false, sections);
   }, [analyze, state.failedSections]);
 
+  const retrySection = useCallback(
+    (section: ReportSection) => {
+      void analyze(false, [section]);
+    },
+    [analyze],
+  );
+
   const cancelAnalysis = useCallback(() => {
     if (!isAnalysisActive(state.phase)) return;
     abortRef.current?.abort();
@@ -825,8 +938,9 @@ function AnalysisReport({
       clearTimeout(cleanupTimerRef.current);
       cleanupTimerRef.current = null;
     }
-    if (autoStart && !effectStartedRef.current) {
+    if (autoStart && (!effectStartedRef.current || handledRunRequestRef.current !== runRequest)) {
       effectStartedRef.current = true;
+      handledRunRequestRef.current = runRequest;
       void analyze();
     }
     return () => {
@@ -837,7 +951,7 @@ function AnalysisReport({
         cleanupTimerRef.current = null;
       }, 0);
     };
-  }, [analyze, autoStart]);
+  }, [analyze, autoStart, runRequest]);
 
   const metadata = state.metadata;
   const publishedAt = formatDate(metadata?.publishedAt ?? null);
@@ -958,23 +1072,31 @@ function AnalysisReport({
           <PartialReportNotice onRetry={retryIncompleteSections} />
         ) : null}
 
-        <ConnectedCompass store={reportStore} />
-        <ConnectedBias store={reportStore} />
-        <ConnectedJournalistContext store={reportStore} />
+        <ConnectedCompass store={reportStore} onRetry={() => retrySection("compass")} />
+        <ConnectedBias store={reportStore} onRetry={() => retrySection("bias")} />
+        <ConnectedJournalistContext
+          store={reportStore}
+          onRetry={() => retrySection("journalist-context")}
+        />
         <ConnectedEvidence
           store={reportStore}
           section="supporting"
           id="supporting"
           title="Supporting Information"
+          onRetry={() => retrySection("supporting")}
         />
         <ConnectedEvidence
           store={reportStore}
           section="contradicting"
           id="contradicting"
           title="Contradicting Information"
+          onRetry={() => retrySection("contradicting")}
         />
-        <ConnectedAdditionalContext store={reportStore} />
-        <ConnectedSourceList store={reportStore} />
+        <ConnectedAdditionalContext
+          store={reportStore}
+          onRetry={() => retrySection("additional-context")}
+        />
+        <ConnectedSourceList store={reportStore} onRetry={() => retrySection("works-cited")} />
 
         {/* Legacy section markup removed in favor of connected sections.
                 {state.compass.status === "error" ? "Unavailable" : "Finding placement…"}
@@ -996,6 +1118,11 @@ function ChatGptApp() {
   const [runtimeAttempt, setRuntimeAttempt] = useState(0);
   const [providerReady, setProviderReady] = useState(false);
   const [articleAccess, setArticleAccess] = useState<"loading" | "granted" | "missing">("loading");
+  const [articlePreview, setArticlePreview] = useState<ArticlePreview | null>(null);
+  const [previewStatus, setPreviewStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [runRequest, setRunRequest] = useState(0);
+  const [analysisPhase, setAnalysisPhase] = useState<ReportPhase>("idle");
   const previousScreenRef = useRef<Screen>("analyze");
   const reportScrollTopRef = useRef(0);
 
@@ -1022,10 +1149,12 @@ function ChatGptApp() {
     }
     previousScreenRef.current = screen;
     requestAnimationFrame(() => {
-      const heading = document.querySelector<HTMLElement>("[data-route-heading]");
-      heading?.focus();
+      const heading =
+        document.querySelector<HTMLElement>("[data-route-heading]") ??
+        document.querySelector<HTMLElement>(".page-transition main h1, .page-transition header h1");
+      heading?.focus({ preventScroll: true });
     });
-  }, [screen]);
+  }, [articleAccess, providerReady, runtimeError, screen, Boolean(runtime)]);
 
   useEffect(() => {
     let active = true;
@@ -1086,6 +1215,41 @@ function ChatGptApp() {
     };
   }, []);
 
+  useEffect(() => {
+    if (
+      !connection.isAuthenticated ||
+      !runtime ||
+      !providerReady ||
+      articleAccess !== "granted" ||
+      screen !== "analyze"
+    ) {
+      return;
+    }
+    let active = true;
+    setPreviewStatus("loading");
+    setPreviewError(null);
+    void getArticlePreview().then(
+      (preview) => {
+        if (!active) return;
+        setArticlePreview(preview);
+        setPreviewStatus("ready");
+      },
+      (cause: unknown) => {
+        if (!active) return;
+        setArticlePreview(null);
+        setPreviewStatus("error");
+        setPreviewError(
+          cause instanceof Error
+            ? cause.message
+            : "Open a news article in this window, then try again.",
+        );
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [articleAccess, connection.isAuthenticated, providerReady, runtime, screen]);
+
   const updatePreferences = async (next: SettingsPreferences): Promise<void> => {
     if (!runtime) throw new Error("Perspectica settings are still loading.");
     const previous = runtime;
@@ -1126,7 +1290,12 @@ function ChatGptApp() {
     setResearchDepth(depth);
     if (!runtime) return;
     try {
-      await updatePreferences({ ...runtime.preferences, depth, mode: depth });
+      await updatePreferences({
+        ...runtime.preferences,
+        ...recommendedInferenceForDepth(depth),
+        depth,
+        mode: depth,
+      });
     } catch (error) {
       setResearchDepth(previousDepth);
       throw error;
@@ -1150,15 +1319,18 @@ function ChatGptApp() {
       },
     },
   ] as const;
+  const auxiliaryScreen = screen === "settings" || screen === "diagnostics" || screen === "about";
 
   let page: ReactNode;
-  if (runtimeError) {
+  if (runtimeError && !auxiliaryScreen) {
     page = (
       <div className="connection-shell atmosphere-page">
         <BrandHeader action="menu" actionLabel="Open preferences" onAction={openSettings} />
         <main className="runtime-state-screen" role="alert">
           <p className="eyebrow">Extension runtime</p>
-          <h1>Perspectica needs a moment.</h1>
+          <h1 data-route-heading tabIndex={-1}>
+            Perspectica needs a moment.
+          </h1>
           <p>{runtimeError}</p>
           <button
             type="button"
@@ -1173,13 +1345,19 @@ function ChatGptApp() {
         </main>
       </div>
     );
-  } else if (connection.isAuthenticated && (!runtime || articleAccess === "loading")) {
+  } else if (
+    connection.isAuthenticated &&
+    !auxiliaryScreen &&
+    (!runtime || articleAccess === "loading")
+  ) {
     page = (
       <div className="connection-shell atmosphere-page">
         <BrandHeader action="menu" actionLabel="Open preferences" onAction={openSettings} />
         <main className="runtime-state-screen" aria-live="polite">
           <p className="eyebrow">Preparing Perspectica</p>
-          <h1>Restoring your local session…</h1>
+          <h1 data-route-heading tabIndex={-1}>
+            Restoring your local session…
+          </h1>
           <div className="section-loading" aria-hidden="true">
             <span />
             <span />
@@ -1188,14 +1366,19 @@ function ChatGptApp() {
         </main>
       </div>
     );
-  } else if (connection.isAuthenticated && runtime && articleAccess === "missing") {
+  } else if (
+    connection.isAuthenticated &&
+    !auxiliaryScreen &&
+    runtime &&
+    articleAccess === "missing"
+  ) {
     page = (
       <ArticleAccessScreen
         onReady={() => setArticleAccess("granted")}
         onOpenSettings={openSettings}
       />
     );
-  } else if (connection.isAuthenticated && runtime && providerReady) {
+  } else if (connection.isAuthenticated && runtime && (providerReady || auxiliaryScreen)) {
     if (screen === "settings") {
       page = (
         <SettingsScreen
@@ -1210,6 +1393,7 @@ function ChatGptApp() {
           onSearchProviderChange={updateSearchProvider}
           researchDepth={researchDepth}
           onResearchDepthChange={updateResearchDepth}
+          analysisLocked={isAnalysisActive(analysisPhase)}
           onOpenDiagnostics={() => setScreen("diagnostics")}
           onOpenAbout={() => setScreen("about")}
           onExaKeySaved={() => {
@@ -1229,8 +1413,14 @@ function ChatGptApp() {
     } else if (screen === "analyze") {
       page = (
         <AnalyzeScreen
-          metadata={null}
-          onAnalyze={() => setScreen("running")}
+          metadata={articlePreview}
+          previewStatus={previewStatus}
+          previewError={previewError}
+          onAnalyze={() => {
+            if (previewStatus !== "ready") return;
+            setRunRequest((request) => request + 1);
+            setScreen("running");
+          }}
           onOpenSettings={openSettings}
           menuItems={menuItems}
           researchDepth={researchDepth}
@@ -1240,7 +1430,7 @@ function ChatGptApp() {
     } else {
       page = null;
     }
-  } else if (connection.isAuthenticated && runtime) {
+  } else if (connection.isAuthenticated && runtime && !auxiliaryScreen) {
     page = (
       <SearchSetupScreen
         preferences={runtime.preferences}
@@ -1288,20 +1478,30 @@ function ChatGptApp() {
           menuItems={menuItems}
           autoStart={screen === "running" || screen === "report"}
           screen={screen === "running" || screen === "report" ? screen : "controller"}
+          runRequest={runRequest}
           onPhaseChange={(phase) => {
-            if ((phase === "complete" || phase === "partial") && screen === "running") {
+            setAnalysisPhase(phase);
+            if (isAnalysisActive(phase) && (screen === "analyze" || screen === "report")) {
+              setScreen("running");
+            } else if ((phase === "complete" || phase === "partial") && screen === "running") {
               setScreen("report");
+            } else if (phase === "cancelled" && (screen === "running" || screen === "report")) {
+              setScreen("analyze");
             }
           }}
         />
       ) : null}
-      <div className="page-transition">{page}</div>
+      <div className="page-transition">
+        <Suspense fallback={<RouteLoadingFallback />}>{page}</Suspense>
+      </div>
     </>
   );
 }
 
 function DemoApp() {
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  type DemoScreen = "report" | "settings";
+  const [screen, setScreen] = useState<DemoScreen>("report");
+  const returnScreenRef = useRef<DemoScreen>("report");
   const [preferences, setPreferences] = useState<SettingsPreferences>({
     ...DEFAULT_ANALYSIS_PREFERENCES,
     mode: "balanced",
@@ -1309,15 +1509,24 @@ function DemoApp() {
 
   return (
     <>
-      <AnalysisReport preferences={preferences} onOpenSettings={() => setSettingsOpen(true)} />
-      {settingsOpen ? (
-        <SettingsScreen
-          authenticated={false}
-          preferences={preferences}
-          onChange={setPreferences}
-          onClose={() => setSettingsOpen(false)}
-          onDisconnect={async () => undefined}
-        />
+      <AnalysisReport
+        preferences={preferences}
+        onOpenSettings={() => {
+          returnScreenRef.current = "report";
+          setScreen("settings");
+        }}
+        screen={screen === "settings" ? "controller" : "report"}
+      />
+      {screen === "settings" ? (
+        <Suspense fallback={<RouteLoadingFallback />}>
+          <SettingsScreen
+            authenticated={false}
+            preferences={preferences}
+            onChange={setPreferences}
+            onClose={() => setScreen(returnScreenRef.current)}
+            onDisconnect={async () => undefined}
+          />
+        </Suspense>
       ) : null}
     </>
   );

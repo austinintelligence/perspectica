@@ -41,6 +41,9 @@ try {
 }
 
 const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+const extensionPackage = JSON.parse(
+  await readFile(path.join(root, "apps", "extension", "package.json"), "utf8"),
+);
 const files = await walk(outputDirectory);
 const relativeFiles = files.map((file) =>
   path.relative(outputDirectory, file).replaceAll("\\", "/"),
@@ -53,6 +56,11 @@ for (const file of relativeFiles) {
 }
 
 if (manifest.manifest_version !== 3) fail("manifest_version must be 3");
+if (manifest.version !== extensionPackage.version) {
+  fail(
+    `manifest version ${JSON.stringify(manifest.version)} does not match package version ${JSON.stringify(extensionPackage.version)}`,
+  );
+}
 if (!manifest.background?.service_worker) fail("MV3 background service worker is missing");
 if (!manifest.side_panel?.default_path) fail("side-panel entrypoint is missing");
 if ((manifest.content_scripts ?? []).length > 0) {

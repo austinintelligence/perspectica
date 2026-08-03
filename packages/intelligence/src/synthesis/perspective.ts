@@ -55,6 +55,11 @@ export function synthesizePerspective(
     emptyReason: journalistAssertions.length > 0 ? undefined : "no-verified-evidence",
   });
   const contextAssertions = ledger.getAssertions().filter((assertion) => assertion.context);
+  const placementAssertions = contextAssertions.filter(
+    (assertion) =>
+      assertion.context?.sourceKind === "publication-history" ||
+      assertion.context?.sourceKind === "journalist-work",
+  );
   const contextSources = new Map(ledger.getSources().map((source) => [source.id, source]));
   const politicalContext: PoliticalContextResult = PoliticalContextResultSchema.parse(
     contextAssertions.length === 0
@@ -97,23 +102,17 @@ export function synthesizePerspective(
           weighting: {
             articleWeight: 0.5,
             publicationHistory:
-              contextAssertions.filter(
+              placementAssertions.filter(
                 (assertion) => assertion.context?.sourceKind === "publication-history",
-              ).length / Math.max(contextAssertions.length, 1),
+              ).length / Math.max(placementAssertions.length, 1),
             journalistWork:
-              contextAssertions.filter(
+              placementAssertions.filter(
                 (assertion) => assertion.context?.sourceKind === "journalist-work",
-              ).length / Math.max(contextAssertions.length, 1),
-            comparableCoverage:
-              contextAssertions.filter(
-                (assertion) => assertion.context?.sourceKind === "comparable-coverage",
-              ).length / Math.max(contextAssertions.length, 1),
-            topicContext:
-              contextAssertions.filter(
-                (assertion) => assertion.context?.sourceKind === "topic-context",
-              ).length / Math.max(contextAssertions.length, 1),
+              ).length / Math.max(placementAssertions.length, 1),
+            comparableCoverage: 0,
+            topicContext: 0,
             rationale:
-              "Article-owned signals remain the anchor; accepted contextual signals contribute no more than fifty percent.",
+              "Article-owned signals remain half of the placement. Verified publication history and journalist work share the contextual half; other research may explain but cannot move the score.",
           },
         },
   );

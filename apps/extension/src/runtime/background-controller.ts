@@ -5,6 +5,7 @@ import { ChatGptSessionManager } from "../auth/chatgpt-session";
 import { ChromeJsonStorageArea, restrictExtensionStorage } from "../storage/areas";
 import { CredentialVault } from "../storage/credential-vault";
 import { IndexedDbCryptoKeyStore } from "../storage/indexed-db-key-store";
+import { IndexedDbEncryptedAnalysisHistoryVault } from "../storage/indexed-db-analysis-history-vault";
 import { JobStore } from "../storage/job-store";
 import { EvidenceCache } from "../storage/evidence-cache";
 import { EncryptedAnalysisHistoryStore } from "../storage/analysis-history";
@@ -12,6 +13,8 @@ import { IndexedDbAnalysisArtifactStore } from "../storage/analysis-artifacts";
 import { PreferencesStore } from "../storage/preferences-store";
 import {
   AnalysisJobSchema,
+  ArticlePreviewSchema,
+  EncryptedResumeEnvelopeSchema,
   ExtensionRequestSchema,
   InternalRequestSchema,
   OffscreenCommandSchema,
@@ -226,9 +229,30 @@ export class BackgroundController {
   private readonly preferences = new PreferencesStore(this.local);
   private readonly researchCache = new EvidenceCache();
   private readonly artifactStore = new IndexedDbAnalysisArtifactStore();
-  private readonly history = new EncryptedAnalysisHistoryStore(this.vault);
-  private readonly jobs = new JobStore(this.local, undefined, this.history, () =>
-    this.clearTransientResearch(),
+  private readonly history = new EncryptedAnalysisHistoryStore(
+    new IndexedDbEncryptedAnalysisHistoryVault(this.vault),
+  );
+  private readonly jobs = new JobStore(
+    this.local,
+    undefined,
+    this.history,
+    () => this.clearTransientResearch(),
+    {
+      get: async (jobId) => {
+        const value = await this.vault.read("analysis-resume", EncryptedResumeEnvelopeSchema);
+        return value?.jobId === jobId ? value.resume : undefined;
+      },
+      set: async (jobId, resume) => {
+        await this.vault.write(
+          "analysis-resume",
+          EncryptedResumeEnvelopeSchema.parse({ jobId, resume }),
+        );
+      },
+      remove: async (jobId) => {
+        const value = await this.vault.read("analysis-resume", EncryptedResumeEnvelopeSchema);
+        if (value?.jobId === jobId) await this.vault.remove("analysis-resume");
+      },
+    },
   );
   private readonly auth = new ChatGptSessionManager(this.session, this.local, this.vault);
   private initialization: Promise<void> | null = null;
@@ -286,21 +310,24 @@ export class BackgroundController {
   private async cacheScopeFor(provider: SearchProviderKind): Promise<string> {
     if (provider === "chatgpt") {
       const accountId = (await this.auth.getState()).account?.accountId;
-      return `chatgpt:${accountId ?? "anonymous"}`;
+      if (!accountId) return "chatgpt:anonymous";
+      return `chatgpt:${await this.scopeDigest(accountId)}`;
     }
     if (provider === "free") return "free:public";
     try {
       const credential = await this.vault.readExa();
       if (!credential) return "exa:unconfigured";
-      const digest = await crypto.subtle.digest(
-        "SHA-256",
-        new TextEncoder().encode(credential.apiKey),
-      );
-      const bytes = new Uint8Array(digest);
-      return `exa:${Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")}`;
+      return `exa:${await this.scopeDigest(credential.apiKey)}`;
     } catch {
       return "exa:unconfigured";
     }
+  }
+
+  private async scopeDigest(value: string): Promise<string> {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join(
+      "",
+    );
   }
 
   private async clearTransientResearch(): Promise<void> {
@@ -308,7 +335,23 @@ export class BackgroundController {
   }
 
   private async clearAccountData(): Promise<void> {
-    await Promise.all([this.clearTransientResearch(), this.jobs.clearHistory()]);
+    // Cancellation waits for the offscreen runtime to finish its in-flight
+    // persistence callback. Clear the active job and journal only after that
+    // barrier so a late event cannot recreate account-local report data.
+    await Promise.all([this.jobs.clearHistory(), this.jobs.clearActiveData()]);
+    // Drop any terminal artifacts still held by an offscreen document that
+    // was between its final event and idle-close timer. A closed document
+    // cannot issue a late provider/cache write after account cleanup.
+    await chrome.offscreen.closeDocument().catch(() => undefined);
+    await this.clearTransientResearch();
+  }
+
+  private async currentProviderScope(resume: AnalysisResumeData): Promise<string> {
+    const current = await this.cacheScopeFor(resume.searchProvider);
+    if (!resume.cacheScope || current !== resume.cacheScope) {
+      throw new Error("The previous analysis belonged to a different provider session.");
+    }
+    return current;
   }
 
   /** Re-dispatch a persisted non-terminal run after a worker/offscreen restart. */
@@ -330,8 +373,10 @@ export class BackgroundController {
         return;
       }
       try {
-        const cacheScope = resume.cacheScope ?? (await this.cacheScopeFor(resume.searchProvider));
-        if (resume.cacheScope && cacheScope !== resume.cacheScope) {
+        let cacheScope: string;
+        try {
+          cacheScope = await this.currentProviderScope(resume);
+        } catch {
           const failed = await this.jobs.update(job.id, (current) => ({
             ...current,
             status: "failed",
@@ -423,25 +468,25 @@ export class BackgroundController {
     if (!isWebPage(currentTab.url) || tabUrlChanged(initialTabUrl, currentTab.url)) {
       throw new Error("The page changed while Perspectica was reading it. Try again.");
     }
-    return { tabId: tab.id, tabUrl: article.canonicalUrl, article };
+    return { tabId: tab.id, tabUrl: currentTab.url, article };
   }
 
   private async startAnalysisOnce(forceNew = false): Promise<AnalysisJob> {
     await this.auth.getFreshTokens();
     const preferences = await this.preferences.get();
-    const analysisConfigFingerprint = createAnalysisConfigFingerprint(preferences);
     if (preferences.searchProvider === "exa" && !(await this.vault.has("exa"))) {
       throw new Error("Add an Exa API key in Perspectica settings before analyzing.");
     }
     const { tabId, tabUrl, article } = await this.extractActiveArticle();
     const cacheScope = await this.cacheScopeFor(preferences.searchProvider);
+    const analysisConfigFingerprint = createAnalysisConfigFingerprint(preferences, cacheScope);
     // Disconnect can race extraction. Re-check ownership immediately before
     // creating a resumable job so a stale token cannot start a new run.
     await this.auth.getFreshTokens();
     const existing = await this.jobs.getActive();
     if (
       existing &&
-      canReuseAnalysisJob(existing, article, tabId, analysisConfigFingerprint, forceNew)
+      canReuseAnalysisJob(existing, article, tabId, analysisConfigFingerprint, forceNew, tabUrl)
     ) {
       return existing;
     }
@@ -474,6 +519,7 @@ export class BackgroundController {
           model: preferences.model,
           reasoningEffort: preferences.reasoningEffort,
           mode: preferences.mode,
+          depth: preferences.depth ?? preferences.mode,
         },
       },
       searchProvider: preferences.searchProvider,
@@ -578,10 +624,7 @@ export class BackgroundController {
     if (!resume || resume.runToken !== current.runToken) {
       throw new Error("The bounded retry context is unavailable. Start a new analysis.");
     }
-    const cacheScope = resume.cacheScope ?? (await this.cacheScopeFor(resume.searchProvider));
-    if (resume.cacheScope && cacheScope !== resume.cacheScope) {
-      throw new Error("The bounded retry context belongs to a different provider session.");
-    }
+    const cacheScope = await this.currentProviderScope(resume);
     await this.auth.getFreshTokens();
     const retrying = await this.jobs.update(jobId, (job) => {
       if (job.status !== "partial" || job.runToken !== current.runToken) return undefined;
@@ -650,7 +693,8 @@ export class BackgroundController {
           if (result.status === "authenticated") {
             const nextAccountId = result.state.account?.accountId ?? null;
             if (previousAccountId && nextAccountId && previousAccountId !== nextAccountId) {
-              await this.clearTransientResearch();
+              await this.cancelActiveAnalysisForDisconnect();
+              await this.clearAccountData();
             }
             await this.pushAuth();
           }
@@ -675,6 +719,7 @@ export class BackgroundController {
           return ok(request.requestId, request.preferences);
         case "providers.saveExaKey":
           await this.vault.writeExa({ apiKey: request.apiKey });
+          await this.clearTransientResearch();
           return ok(request.requestId, { saved: true });
         case "providers.testExaKey":
           await testExaConnection(request.apiKey);
@@ -684,6 +729,9 @@ export class BackgroundController {
           await this.clearTransientResearch();
           return ok(request.requestId, { removed: true });
         case "providers.test": {
+          if (request.provider === "free") {
+            return ok(request.requestId, { available: true });
+          }
           if (request.provider === "exa") {
             const credential = await this.vault.readExa();
             if (!credential) throw new Error("Add an Exa API key first.");
@@ -702,6 +750,7 @@ export class BackgroundController {
                 model: preferences.model,
                 reasoningEffort: preferences.reasoningEffort,
                 mode: preferences.mode,
+                depth: preferences.depth ?? preferences.mode,
               },
             }),
           )) as { ok?: boolean; data?: unknown; error?: string } | undefined;
@@ -711,6 +760,21 @@ export class BackgroundController {
             );
           }
           return ok(request.requestId, { available: true, models, probe: probe.data });
+        }
+        case "article.preview": {
+          const { tabUrl, article } = await this.extractActiveArticle();
+          return ok(
+            request.requestId,
+            ArticlePreviewSchema.parse({
+              title: article.title,
+              author: article.author,
+              publication: article.publication,
+              publishedAt: article.publishedAt,
+              contentType: article.contentType,
+              tabUrl,
+              articleFingerprint: article.fingerprint,
+            }),
+          );
         }
         case "analysis.start":
           return ok(request.requestId, await this.startAnalysis(request.forceNew ?? false));

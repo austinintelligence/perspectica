@@ -58,6 +58,22 @@ function context(score: number) {
   };
 }
 
+function nonPlacementContext(score: number) {
+  const value = context(score);
+  return {
+    ...value,
+    signals: value.signals.map((signal) => ({
+      ...signal,
+      sourceKind: "comparable-coverage" as const,
+    })),
+    weighting: {
+      ...value.weighting,
+      publicationHistory: 0,
+      comparableCoverage: 1,
+    },
+  };
+}
+
 describe("V2 one-dimensional compass", () => {
   it("limits context-assisted influence to fifty percent", () => {
     const result = projectCompassWithContext(index, plan, context(1));
@@ -91,5 +107,20 @@ describe("V2 one-dimensional compass", () => {
     expect(result.basis).toBe("context-led");
     expect(result.score).toBe(-1);
     expect(result.confidence).toBe("low");
+  });
+
+  it("does not let comparable coverage create or shift a political position", () => {
+    const articleResult = projectCompassWithContext(index, plan, nonPlacementContext(3));
+    expect(articleResult.score).toBe(-1);
+    expect(articleResult.basis).toBe("article-led");
+    expect(articleResult.influence.comparableCoverage).toBe(0);
+
+    const contextOnly = projectCompassWithContext(
+      index,
+      { articleSignals: { compass: [] } } as never,
+      nonPlacementContext(3),
+    );
+    expect(contextOnly.label).toBe("unclear");
+    expect(contextOnly.score).toBeNull();
   });
 });

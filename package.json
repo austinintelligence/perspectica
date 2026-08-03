@@ -15,6 +15,10 @@
   },
   "scripts": {
     "build": "pnpm -r --if-present build",
+    "benchmark:build": "node scripts/benchmarks/measure-extension-build.mjs",
+    "benchmark:loc": "node scripts/benchmarks/report-dependencies-loc.mjs",
+    "benchmark:security": "node scripts/benchmarks/extension-security-scan.mjs",
+    "benchmark:size": "node scripts/benchmarks/report-extension-size.mjs --max-total-mib 1.2",
     "dataset:spectrum:collect": "node scripts/collect-spectrum-calibration.mjs",
     "dataset:spectrum:summarize": "node scripts/summarize-spectrum-dataset.mjs",
     "dataset:spectrum:validate": "node scripts/validate-spectrum-dataset.mjs",
@@ -22,6 +26,7 @@
     "dev:extension": "pnpm --filter @perspectica/extension dev",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "check:release-version": "node scripts/check-release-version.mjs",
     "check:extension-package": "node scripts/check-extension-package.mjs",
     "bench:v2": "node scripts/benchmark-v2.mjs",
     "package:extension": "pnpm --filter @perspectica/extension zip",
@@ -30,7 +35,7 @@
     "test:watch": "vitest",
     "typecheck": "pnpm -r --if-present typecheck",
     "verify": "pnpm format:check && pnpm typecheck && pnpm test && pnpm build",
-    "verify:release": "pnpm verify && pnpm package:extension && pnpm check:extension-package"
+    "verify:release": "pnpm verify && pnpm package:extension && pnpm check:extension-package && pnpm benchmark:security && pnpm benchmark:size && pnpm bench:v2"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

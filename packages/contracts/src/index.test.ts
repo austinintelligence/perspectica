@@ -161,8 +161,12 @@ describe("V2 research depth and providers", () => {
   it("exposes the four bounded depth profiles", () => {
     expect(ResearchDepthSchema.options).toEqual(["quick", "balanced", "deep", "verified"]);
     expect(RESEARCH_PROFILES.quick.maxModelSteps).toBe(2);
+    expect(RESEARCH_PROFILES.quick.defaultModel).toBe("gpt-5.4");
+    expect(RESEARCH_PROFILES.balanced.defaultReasoningEffort).toBe("medium");
+    expect(RESEARCH_PROFILES.deep.maxMissions).toBe(5);
     expect(RESEARCH_PROFILES.verified.maxOutputTokens).toBe(4_000);
     expect(RESEARCH_PROFILES.verified.specialistTimeoutMs).toBe(600_000);
+    expect(RESEARCH_PROFILES.verified.hardCeilingMs).toBe(600_000);
     expect(
       (["quick", "balanced", "deep", "verified"] as const).map((depth) => [
         ANALYSIS_LIMITS[depth].maxMissions,

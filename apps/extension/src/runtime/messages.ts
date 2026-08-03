@@ -1,4 +1,8 @@
-import { AnalysisPreferencesSchema, ArticleDocumentSchema } from "@perspectica/contracts";
+import {
+  AnalysisPreferencesSchema,
+  ArticleDocumentSchema,
+  ContentTypeSchema,
+} from "@perspectica/contracts";
 import { AnalysisModeSchema } from "@perspectica/contracts/preferences";
 import { PipelineEventSchema } from "@perspectica/contracts/events";
 import { ReportSectionSchema } from "@perspectica/contracts/report";
@@ -117,6 +121,17 @@ export const AnalysisJobSchema = z.object({
 });
 export type AnalysisJob = z.infer<typeof AnalysisJobSchema>;
 
+export const ArticlePreviewSchema = z.object({
+  title: requiredText.max(2_000),
+  author: z.string().trim().max(2_000).nullable(),
+  publication: z.string().trim().max(1_000).nullable(),
+  publishedAt: z.string().datetime({ offset: true }).nullable(),
+  contentType: ContentTypeSchema,
+  tabUrl: z.string().url(),
+  articleFingerprint: requiredText.max(128),
+});
+export type ArticlePreview = z.infer<typeof ArticlePreviewSchema>;
+
 export const OffscreenAnalysisRequestSchema = z.object({
   article: ArticleDocumentSchema,
   client: z.object({ extensionVersion: requiredText.max(100) }),
@@ -133,6 +148,12 @@ export const AnalysisResumeDataSchema = z.object({
   cacheScope,
 });
 export type AnalysisResumeData = z.infer<typeof AnalysisResumeDataSchema>;
+
+export const EncryptedResumeEnvelopeSchema = z.object({
+  jobId,
+  resume: AnalysisResumeDataSchema,
+});
+export type EncryptedResumeEnvelope = z.infer<typeof EncryptedResumeEnvelopeSchema>;
 
 export const RUNTIME_PORT_NAME = "perspectica.runtime" as const;
 
@@ -166,6 +187,7 @@ export const ExtensionRequestSchema = z.discriminatedUnion("type", [
     type: z.literal("providers.test"),
     provider: SearchProviderSchema,
   }),
+  baseRequest.extend({ type: z.literal("article.preview") }),
   baseRequest.extend({ type: z.literal("analysis.start"), forceNew: z.boolean().optional() }),
   baseRequest.extend({
     type: z.literal("analysis.retry"),

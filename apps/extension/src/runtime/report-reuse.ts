@@ -19,6 +19,7 @@ const REUSABLE_JOB_STATUSES = new Set<AnalysisJob["status"]>([
 export function createAnalysisConfigFingerprint(
   preferences: Pick<ExtensionPreferences, "model" | "reasoningEffort" | "searchProvider"> &
     Partial<Pick<ExtensionPreferences, "mode" | "depth">>,
+  providerScope = "provider-scope:unknown",
 ): string {
   return [
     "analysis-config-v2",
@@ -30,6 +31,7 @@ export function createAnalysisConfigFingerprint(
     canonicalMode(preferences.mode),
     preferences.depth ?? "balanced",
     preferences.searchProvider,
+    providerScope,
   ].join(":");
 }
 
@@ -51,12 +53,13 @@ export function canReuseAnalysisJob(
   tabId: number,
   analysisConfigFingerprint: string,
   forceNew = false,
+  currentTabUrl = article.canonicalUrl,
 ): boolean {
   if (forceNew || !job || !REUSABLE_JOB_STATUSES.has(job.status) || job.tabId !== tabId) {
     return false;
   }
   const jobUrl = normalizeCanonicalUrl(job.tabUrl);
-  const articleUrl = normalizeCanonicalUrl(article.canonicalUrl);
+  const articleUrl = normalizeCanonicalUrl(currentTabUrl);
   return Boolean(
     jobUrl &&
     articleUrl &&

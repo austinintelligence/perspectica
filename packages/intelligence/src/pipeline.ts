@@ -270,6 +270,13 @@ export async function* analyzeArticle(input: AnalysisInput): AsyncGenerator<Pipe
       ],
       ledger,
     );
+    for (const section of failedSections) {
+      yield emit("section.failed", {
+        section,
+        message: "This section needs another evidence pass.",
+        retryable: true,
+      });
+    }
     const status = failedSections.length > 0 ? "partial" : "complete";
     yield emit("phase.changed", {
       phase: status === "complete" ? "complete" : "partial",
@@ -406,6 +413,13 @@ export async function* retryArticleSections(
     const failedSections = failedSectionsForReport(input.sections, artifacts.ledger).filter(
       (section) => section !== "works-cited",
     );
+    for (const section of failedSections) {
+      yield emit("section.failed", {
+        section,
+        message: "This section remains limited by the available evidence.",
+        retryable: true,
+      });
+    }
     const completedAt = now();
     yield emit("phase.changed", {
       phase: failedSections.length > 0 ? "partial" : "complete",

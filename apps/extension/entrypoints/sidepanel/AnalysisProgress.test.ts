@@ -3,12 +3,18 @@ import { getAnalysisProgress } from "./AnalysisProgress";
 import { beginExtraction, createInitialReportState } from "./report-state";
 
 describe("analysis pipeline progress", () => {
-  it("exposes the five pipeline stages", () => {
+  it("maps five internal stages to four reader-facing phases", () => {
     const state = beginExtraction();
-    expect(getAnalysisProgress(state)).toMatchObject({ phase: "index", completed: 0, total: 5 });
-    expect(
-      getAnalysisProgress({ ...state, phase: "plan", phaseMessage: "Planning" }),
-    ).toMatchObject({ phase: "plan", label: "Planning research", completed: 1 });
+    expect(getAnalysisProgress(state)).toMatchObject({
+      phase: "reading",
+      label: "Reading article",
+      completed: 0,
+      total: 4,
+    });
+    expect(getAnalysisProgress({ ...state, phase: "plan" })).toMatchObject({
+      phase: "planning",
+      completed: 1,
+    });
     expect(
       getAnalysisProgress({
         ...state,
@@ -22,15 +28,25 @@ describe("analysis pipeline progress", () => {
           sufficiency: "more evidence needed",
         },
       }),
-    ).toMatchObject({ phase: "retrieval", detail: "2 of 4 missions checked", completed: 2 });
+    ).toMatchObject({ phase: "researching", detail: "3 sources accepted", completed: 2 });
     expect(getAnalysisProgress({ ...state, phase: "perspective" })).toMatchObject({
-      phase: "perspective",
-      completed: 3,
+      phase: "researching",
+      completed: 2,
     });
     expect(getAnalysisProgress({ ...state, phase: "composition" })).toMatchObject({
-      phase: "composition",
-      completed: 4,
+      phase: "synthesizing",
+      completed: 3,
     });
+  });
+
+  it("marks timeline steps monotonically", () => {
+    const progress = getAnalysisProgress({ ...beginExtraction(), phase: "perspective" });
+    expect(progress?.steps.map((step) => step.status)).toEqual([
+      "complete",
+      "complete",
+      "active",
+      "waiting",
+    ]);
   });
 
   it("does not render after a terminal state", () => {

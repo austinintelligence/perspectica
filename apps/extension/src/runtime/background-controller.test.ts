@@ -135,6 +135,37 @@ function completedEvent(status: "complete" | "partial" = "complete"): PipelineEv
   });
 }
 
+function extractedArticle() {
+  return {
+    fingerprint: "preview-fingerprint",
+    canonicalUrl: "https://example.com/story",
+    title: "A locally extracted article",
+    author: "Riley Reporter",
+    publication: "Example News",
+    publishedAt: "2026-08-03T12:00:00.000Z",
+    language: "en",
+    contentType: "news" as const,
+    paragraphs: [
+      {
+        id: "p-1",
+        index: 0,
+        kind: "paragraph" as const,
+        speaker: null,
+        text: "This is enough visible article text for the local preview fixture.",
+      },
+    ],
+    links: [],
+    extraction: {
+      extractorVersion: "test",
+      extractedAt: "2026-08-03T12:00:00.000Z",
+      wordCount: 11,
+      articleStatus: "article" as const,
+      contentChars: 65,
+      contentTruncated: false,
+    },
+  };
+}
+
 function sender(path: string, id = "perspectica-test-extension") {
   return { id, url: `chrome-extension://${id}/${path}` } as chrome.runtime.MessageSender;
 }
@@ -191,6 +222,59 @@ describe("BackgroundController runtime protocol", () => {
     expect(external).toMatchObject({ ok: false, code: "forbidden", requestId: "external" });
     expect(context.sendMessage).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: "offscreen.analysis.start" }),
+    );
+  });
+
+  it("returns a local article preview without starting the analysis runtime", async () => {
+    const context = installChrome();
+    const tab = { id: 7, url: "https://example.com/story?edition=us" };
+    vi.mocked(chrome.tabs.query as unknown as () => Promise<chrome.tabs.Tab[]>).mockResolvedValue([
+      tab as chrome.tabs.Tab,
+    ]);
+    vi.mocked(chrome.tabs.get as unknown as () => Promise<chrome.tabs.Tab>).mockResolvedValue(
+      tab as chrome.tabs.Tab,
+    );
+    vi.mocked(
+      chrome.scripting.executeScript as unknown as () => Promise<
+        Array<{ frameId: number; result: ReturnType<typeof extractedArticle> }>
+      >,
+    ).mockResolvedValue([{ frameId: 0, result: extractedArticle() }]);
+    const controller = new BackgroundController();
+
+    await expect(
+      dispatch(
+        controller,
+        { type: "article.preview", requestId: "preview" },
+        sender("sidepanel.html"),
+      ),
+    ).resolves.toMatchObject({
+      ok: true,
+      data: {
+        title: "A locally extracted article",
+        author: "Riley Reporter",
+        publication: "Example News",
+        tabUrl: "https://example.com/story?edition=us",
+        articleFingerprint: "preview-fingerprint",
+      },
+    });
+    expect(context.sendMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "offscreen.analysis.start" }),
+    );
+  });
+
+  it("reports the Free provider ready without creating an offscreen provider probe", async () => {
+    const context = installChrome();
+    const controller = new BackgroundController();
+
+    await expect(
+      dispatch(
+        controller,
+        { type: "providers.test", provider: "free", requestId: "test-free" },
+        sender("sidepanel.html"),
+      ),
+    ).resolves.toMatchObject({ ok: true, data: { available: true } });
+    expect(context.sendMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "offscreen.providers.test" }),
     );
   });
 
@@ -373,6 +457,40 @@ describe("BackgroundController runtime protocol", () => {
     expect(context.sendMessage).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: "analysis.jobChanged" }),
     );
+  });
+
+  it("disconnects by deleting the active job and its replay journal", async () => {
+    const context = installChrome();
+    const controller = new BackgroundController();
+    const jobs = await putJob(context, job("analyzing"));
+    const offscreen = sender("offscreen.html");
+
+    await expect(
+      dispatch(
+        controller,
+        {
+          type: "internal.analysis.event",
+          requestId: "disconnect-event",
+          jobId: "job-1",
+          runToken: "run-1",
+          sequence: 1,
+          event: metadataEvent(1),
+        },
+        offscreen,
+      ),
+    ).resolves.toMatchObject({ ok: true, data: { accepted: true } });
+
+    await expect(
+      dispatch(
+        controller,
+        { type: "auth.disconnect", requestId: "disconnect" },
+        sender("sidepanel.html"),
+      ),
+    ).resolves.toMatchObject({ ok: true, data: { status: "unauthenticated" } });
+
+    await expect(jobs.getActive()).resolves.toBeUndefined();
+    await expect(jobs.get("job-1")).resolves.toBeUndefined();
+    await expect(jobs.getEventsSince("job-1", 0)).resolves.toEqual([]);
   });
 
   it("rejects stale and terminal telemetry by run token", async () => {

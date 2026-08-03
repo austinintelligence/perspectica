@@ -14,6 +14,7 @@ const CACHE_TTL_MS = 10 * 60_000;
 const MAX_RESULT_CONTENT = 14_000;
 const MAX_RESPONSE_BYTES = 1_500_000;
 const MAX_FETCH_URLS = 4;
+const MAX_REDIRECTS = 3;
 
 export interface FreeEvidenceDiagnostics {
   missionId: string;
@@ -32,6 +33,7 @@ function isPrivateIpLiteral(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return true;
   if (
+    host === "::" ||
     host === "::1" ||
     host.startsWith("fe80:") ||
     host.startsWith("fc") ||
@@ -39,9 +41,31 @@ function isPrivateIpLiteral(hostname: string): boolean {
   ) {
     return true;
   }
+  // URL normalizes IPv4-mapped IPv6 literals to forms such as
+  // `::ffff:7f00:1`; classify the embedded address before allowing a fetch.
+  if (host.startsWith("::ffff:")) {
+    const mapped = host.slice("::ffff:".length);
+    const dotted = mapped.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    const hex = mapped.match(/^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+    const octets = dotted
+      ? (dotted.slice(1).map(Number) as [number, number, number, number])
+      : hex
+        ? ([
+            Number.parseInt(hex[1]!, 16) >> 8,
+            Number.parseInt(hex[1]!, 16) & 0xff,
+            Number.parseInt(hex[2]!, 16) >> 8,
+            Number.parseInt(hex[2]!, 16) & 0xff,
+          ] as [number, number, number, number])
+        : null;
+    if (octets && isPrivateIpv4(octets)) return true;
+  }
   const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (!ipv4) return false;
   const octets = ipv4.slice(1).map(Number) as [number, number, number, number];
+  return isPrivateIpv4(octets);
+}
+
+function isPrivateIpv4(octets: [number, number, number, number]): boolean {
   if (octets.some((part) => part > 255)) return true;
   return (
     octets[0] === 0 ||
@@ -106,15 +130,37 @@ function boundedTextFromHtml(html: string): string {
     .slice(0, MAX_RESULT_CONTENT);
 }
 
-async function readBounded(response: Response): Promise<string> {
+export async function readBounded(response: Response): Promise<string> {
   const declared = Number(response.headers.get("content-length") ?? 0);
   if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
     throw new Error("The source response is too large to read safely.");
   }
-  const value = await response.text();
-  if (value.length > MAX_RESPONSE_BYTES)
-    throw new Error("The source response is too large to read safely.");
-  return value;
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("The source response did not provide a readable body.");
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      const chunk = next.value;
+      totalBytes += chunk.byteLength;
+      if (totalBytes > MAX_RESPONSE_BYTES) {
+        await reader.cancel();
+        throw new Error("The source response is too large to read safely.");
+      }
+      chunks.push(chunk);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
 }
 
 function withAbort(
@@ -270,16 +316,31 @@ export class FreeEvidenceRetriever implements EvidenceRetriever {
     if (!isSafePublisherUrl(url)) return null;
     const timed = withAbort(signal, 18_000);
     try {
-      const response = await this.fetchImplementation(url, {
-        signal: timed.signal,
-        credentials: "omit",
-        redirect: "follow",
-      });
-      const contentType = response.headers.get("content-type")?.toLocaleLowerCase("en-US") ?? "";
-      if (!response.ok || !contentType.includes("text/html")) return null;
-      const finalUrl = normalizeCanonicalUrl(response.url || url);
-      if (!finalUrl || !isSafePublisherUrl(finalUrl)) return null;
-      return boundedTextFromHtml(await readBounded(response));
+      let currentUrl = url;
+      for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
+        const response = await this.fetchImplementation(currentUrl, {
+          signal: timed.signal,
+          credentials: "omit",
+          // Validate each Location before issuing the next request. Following
+          // redirects automatically would send a request to a private host
+          // before the final response URL could be checked.
+          redirect: "manual",
+        });
+        if (response.status >= 300 && response.status < 400) {
+          if (redirect === MAX_REDIRECTS) return null;
+          const location = response.headers.get("location");
+          const nextUrl = location ? normalizeCanonicalUrl(location, currentUrl) : null;
+          if (!nextUrl || !isSafePublisherUrl(nextUrl)) return null;
+          currentUrl = nextUrl;
+          continue;
+        }
+        const contentType = response.headers.get("content-type")?.toLocaleLowerCase("en-US") ?? "";
+        if (!response.ok || !contentType.includes("text/html")) return null;
+        const finalUrl = normalizeCanonicalUrl(response.url || currentUrl);
+        if (!finalUrl || !isSafePublisherUrl(finalUrl)) return null;
+        return boundedTextFromHtml(await readBounded(response));
+      }
+      return null;
     } catch (error) {
       if (signal.aborted) throw error;
       return null;

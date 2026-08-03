@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { RetrievalPlan } from "@perspectica/contracts/evidence";
-import { FreeEvidenceRetriever, isSafePublisherUrl } from "./free-evidence";
+import { FreeEvidenceRetriever, isSafePublisherUrl, readBounded } from "./free-evidence";
 
 const plan: RetrievalPlan = {
   missions: [
@@ -29,7 +29,26 @@ describe("free V2 evidence retrieval", () => {
     expect(isSafePublisherUrl("http://example.com/report")).toBe(false);
     expect(isSafePublisherUrl("https://127.0.0.1/report")).toBe(false);
     expect(isSafePublisherUrl("https://[::1]/report")).toBe(false);
+    expect(isSafePublisherUrl("https://[::ffff:127.0.0.1]/report")).toBe(false);
+    expect(isSafePublisherUrl("https://[::ffff:7f00:1]/report")).toBe(false);
     expect(isSafePublisherUrl("https://user:secret@example.com/report")).toBe(false);
+  });
+
+  it("stops reading a chunked response once the byte budget is exceeded", async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(1_000_000));
+        controller.enqueue(new Uint8Array(600_000));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    await expect(
+      readBounded(new Response(body, { headers: { "content-type": "text/html" } })),
+    ).rejects.toThrow("too large");
+    expect(cancelled).toBe(true);
   });
 
   it("turns discovery into source text only after a public page read", async () => {
@@ -95,5 +114,37 @@ describe("free V2 evidence retrieval", () => {
       contentKind: "search-summary",
       discoveryExcerpt: null,
     });
+  });
+
+  it("validates every redirect before fetching the next URL", async () => {
+    const fetchImplementation = vi.fn(async (input: URL | RequestInfo) => {
+      const url = String(input);
+      if (url.includes("gdeltproject")) {
+        return new Response(
+          JSON.stringify({ articles: [{ url: "https://news.example/report", title: "Report" }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.includes("duckduckgo")) {
+        return new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(null, {
+        status: 302,
+        headers: { location: "https://[::ffff:127.0.0.1]/private" },
+      });
+    });
+    const retriever = new FreeEvidenceRetriever(fetchImplementation as typeof fetch);
+    const batches = [];
+    for await (const batch of retriever.retrieve(plan, new AbortController().signal))
+      batches.push(batch);
+
+    expect(batches[0]?.candidates[0]).toMatchObject({
+      contentKind: "search-summary",
+      discoveryExcerpt: null,
+    });
+    expect(fetchImplementation).toHaveBeenCalledTimes(3);
   });
 });

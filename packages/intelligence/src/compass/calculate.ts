@@ -35,11 +35,15 @@ function contextScore(context: PoliticalContextResult): {
   score: number;
   weight: number;
 } {
-  const weighted = context.signals.reduce(
+  const placementSignals = context.signals.filter(
+    (signal) =>
+      signal.sourceKind === "publication-history" || signal.sourceKind === "journalist-work",
+  );
+  const weighted = placementSignals.reduce(
     (total, signal) => total + signal.score * signal.strength * signal.relevance,
     0,
   );
-  const weight = context.signals.reduce(
+  const weight = placementSignals.reduce(
     (total, signal) => total + signal.strength * signal.relevance,
     0,
   );
@@ -69,13 +73,11 @@ function contextInfluence(
   const weighting = context.weighting;
   const raw = {
     publication: weighting?.publicationHistory ?? 0.65,
-    journalist: weighting?.journalistWork ?? 0.1,
-    comparableCoverage: weighting?.comparableCoverage ?? 0.2,
-    topicContext: weighting?.topicContext ?? 0.05,
+    journalist: weighting?.journalistWork ?? 0.35,
+    comparableCoverage: 0,
+    topicContext: 0,
   };
-  const available = (Object.keys(counts) as Array<keyof typeof counts>).filter(
-    (kind) => counts[kind] > 0,
-  );
+  const available = (["publication", "journalist"] as const).filter((kind) => counts[kind] > 0);
   const totalWeight = available.reduce((sum, kind) => sum + raw[kind], 0);
   const totalCount = available.reduce((sum, kind) => sum + counts[kind], 0);
   const denominator = totalWeight > 0 ? totalWeight : totalCount;
@@ -94,20 +96,8 @@ function contextInfluence(
           ? raw.journalist / denominator
           : counts.journalist / denominator
         : 0),
-    comparableCoverage:
-      contextWeight *
-      (denominator > 0
-        ? totalWeight > 0
-          ? raw.comparableCoverage / denominator
-          : counts.comparableCoverage / denominator
-        : 0),
-    topicContext:
-      contextWeight *
-      (denominator > 0
-        ? totalWeight > 0
-          ? raw.topicContext / denominator
-          : counts.topicContext / denominator
-        : 0),
+    comparableCoverage: 0,
+    topicContext: 0,
   };
 }
 
@@ -221,10 +211,11 @@ export function projectCompassWithContext(
   }
   const contextual = contextScore(context);
   if (contextual.weight <= 0) return CompassResultSchema.parse({ ...article, context });
-  // Direct article signals anchor the placement, while validated context can
-  // contribute exactly the remaining half. Context-only placement is allowed
-  // when the article contains no endorsed spectrum signal, but remains low
-  // confidence and is never presented as article-owned framing.
+  // Direct article signals anchor the placement, while verified publication
+  // history and journalist work share exactly the remaining half. Comparable
+  // coverage and topic context may explain a result, but cannot manufacture a
+  // political position. Context-only placement is allowed only from those two
+  // verified historical lanes and remains explicitly low confidence.
   const hasArticle = article.score !== null;
   const score = roundedScore(
     hasArticle ? (article.score ?? 0) * 0.5 + contextual.score * 0.5 : contextual.score,
@@ -246,8 +237,8 @@ export function projectCompassWithContext(
     confidenceScore,
     confidence: confidenceScore >= 0.75 ? "high" : confidenceScore >= 0.45 ? "medium" : "low",
     explanation: hasArticle
-      ? `${article.explanation} Bounded publication, journalist, comparable-coverage, and topic-context evidence shifted the contextual estimate cautiously toward ${display[placement].toLocaleLowerCase("en-US")}.`
-      : `The available publication, journalist, comparable-coverage, and topic-context research is closest to ${display[placement].toLocaleLowerCase("en-US")} on the political spectrum.`,
+      ? `${article.explanation} Verified publication history and journalist work shifted the contextual estimate cautiously toward ${display[placement].toLocaleLowerCase("en-US")}.`
+      : `The available publication-history and journalist-work research is closest to ${display[placement].toLocaleLowerCase("en-US")} on the political spectrum.`,
     basis: hasArticle ? "context-assisted" : "context-led",
     context,
     influence: {
