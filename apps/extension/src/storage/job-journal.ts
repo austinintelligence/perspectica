@@ -43,14 +43,36 @@ export class AnalysisJournal {
 
   async appendEvent(envelope: AnalysisEnvelope): Promise<void> {
     const parsed = structuredClone(envelope);
-    this.eventMemory.set(memoryKey(envelope.jobId, envelope.sequence), parsed);
     const db = await this.open();
-    if (!db) return;
+    if (!db) {
+      this.eventMemory.set(memoryKey(envelope.jobId, envelope.sequence), parsed);
+      return;
+    }
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(EVENT_STORE, "readwrite");
       tx.objectStore(EVENT_STORE).put(parsed);
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error ?? new Error("Could not append analysis event."));
+    });
+    this.eventMemory.set(memoryKey(envelope.jobId, envelope.sequence), parsed);
+  }
+
+  async getEvent(jobId: string, sequence: number): Promise<AnalysisEnvelope | undefined> {
+    const cached = this.eventMemory.get(memoryKey(jobId, sequence));
+    if (cached) return structuredClone(cached);
+    const db = await this.open();
+    if (!db) return undefined;
+    return new Promise((resolve) => {
+      const request = db
+        .transaction(EVENT_STORE, "readonly")
+        .objectStore(EVENT_STORE)
+        .get([jobId, sequence]);
+      request.onerror = () => resolve(undefined);
+      request.onsuccess = () => {
+        const value = request.result as AnalysisEnvelope | undefined;
+        if (value) this.eventMemory.set(memoryKey(jobId, sequence), structuredClone(value));
+        resolve(value ? structuredClone(value) : undefined);
+      };
     });
   }
 

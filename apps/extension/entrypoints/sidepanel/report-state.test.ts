@@ -56,6 +56,7 @@ describe("reducePipelineEvent", () => {
       event({
         type: "research.progress",
         data: {
+          candidateCount: 0,
           completedMissions: 1,
           totalMissions: 3,
           acceptedSources: 2,

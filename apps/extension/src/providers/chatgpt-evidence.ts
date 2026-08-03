@@ -1,27 +1,21 @@
 import type { ChatGPTProvider } from "@opencoredev/loginwithchatgpt-ai";
 import { generateText } from "ai";
+import { EvidenceBatchSchema } from "@perspectica/contracts/evidence";
 import type {
+  EvidenceCandidate,
   EvidenceBatch,
-  EvidenceCard,
   EvidenceRetriever,
   RetrievalPlan,
 } from "@perspectica/contracts/evidence";
 import { normalizeCanonicalUrl } from "@perspectica/contracts/url";
+import { sourceIdFor } from "@perspectica/intelligence";
 import type { EvidenceResultCache } from "../storage/evidence-cache";
 
 type GeneratedSource = Awaited<ReturnType<typeof generateText>>["sources"][number];
 type GeneratedUrlSource = Extract<GeneratedSource, { sourceType: "url" }>;
 
-function sourceType(url: string): EvidenceCard["sourceType"] {
+function sourceType(url: string): EvidenceCandidate["sourceType"] {
   return /\.(?:gov|mil|edu)(?:\.|\/|$)/i.test(url) ? "primary-record" : "independent-reporting";
-}
-
-function relationship(plan: RetrievalPlan["missions"][number]): EvidenceCard["relationship"] {
-  return plan.purpose === "correction-or-qualification"
-    ? "qualifies"
-    : plan.purpose === "comparable-coverage"
-      ? "adds-context"
-      : "supports";
 }
 
 function hostname(url: string): string {
@@ -69,25 +63,21 @@ export class NativeChatGptEvidenceRetriever implements EvidenceRetriever {
         })),
       });
       const cached = await this.persistentCache?.get<EvidenceBatch[]>(cacheKey);
-      if (cached?.length) {
+      const cachedBatches = (cached ?? [])
+        .map((batch) => EvidenceBatchSchema.safeParse(batch))
+        .flatMap((parsed) => (parsed.success ? [parsed.data] : []));
+      if (cachedBatches.length) {
         this.onDiagnostics?.({
           missionCount: plan.missions.length,
           durationMs: Date.now() - startedAt,
-          sourceCount: cached.reduce((total, batch) => total + batch.cards.length, 0),
+          sourceCount: cachedBatches.reduce((total, batch) => total + batch.candidates.length, 0),
           cacheHit: true,
           outcome: "ready",
         });
-        for (const [index, batch] of cached.entries()) {
-          const mission = plan.missions[index];
-          if (!mission) continue;
+        for (const batch of cachedBatches) {
           yield {
             ...batch,
-            missionId: mission.id,
-            cards: batch.cards.map((card) => ({
-              ...card,
-              missionId: mission.id,
-              claimId: mission.claimIds[0] ?? null,
-            })),
+            coveredMissionIds: plan.missions.map((mission) => mission.id),
             searched: false,
             cacheHit: true,
             durationMs: 0,
@@ -117,7 +107,7 @@ export class NativeChatGptEvidenceRetriever implements EvidenceRetriever {
         prompt,
         maxRetries: 1,
         timeout: {
-          totalMs: Math.min(60_000, Math.max(20_000, plan.deadlineAt - Date.now())),
+          totalMs: Math.min(60_000, Math.max(1_000, plan.deadlineAt - Date.now())),
           firstChunkMs: 45_000,
           chunkMs: 30_000,
         },
@@ -130,41 +120,40 @@ export class NativeChatGptEvidenceRetriever implements EvidenceRetriever {
           return [{ source, url }];
         });
       const unique = [...new Map(sources.map((item) => [item.url, item])).values()];
-      const cardsByMission = new Map<string, EvidenceCard[]>();
-      unique.forEach(({ source, url }, index) => {
-        const mission = plan.missions[index % plan.missions.length]!;
-        const statement = `Native ChatGPT web search surfaced ${source.title?.trim() || hostname(url)} as a relevant source for this mission. The linked page was not fetched as a transcript.`;
-        const card: EvidenceCard = {
-          missionId: mission.id,
-          claimId: mission.claimIds[0] ?? null,
-          sourceUrl: url,
-          title: source.title?.trim() || hostname(url),
-          publication: hostname(url),
-          publishedAt: null,
-          statement,
-          excerpt: null,
-          content: statement,
-          contentKind: "search-summary",
-          relationship: relationship(mission),
-          sourceType: sourceType(url),
-          confidence: 0.42,
-          provider: "chatgpt",
-        };
-        cardsByMission.set(mission.id, [...(cardsByMission.get(mission.id) ?? []), card]);
-      });
-      const batches = plan.missions.map((mission) => ({
-        missionId: mission.id,
-        provider: "chatgpt" as const,
-        cards: cardsByMission.get(mission.id) ?? [],
-        searched: true,
-        cacheHit: false,
-        durationMs: Date.now() - startedAt,
+      const discoveryContext = result.text.trim().slice(0, 20_000) || null;
+      const candidates: EvidenceCandidate[] = unique.map(({ source, url }) => ({
+        id: sourceIdFor(url, "candidate"),
+        missionId: null,
+        sourceUrl: url,
+        title: source.title?.trim() || hostname(url),
+        publication: hostname(url),
+        publishedAt: null,
+        content: discoveryContext ?? `Native web search returned ${hostname(url)}.`,
+        contentKind: "search-summary",
+        sourceType: sourceType(url),
+        discoveryContext,
+        discoveryExcerpt: null,
+        providerScore: null,
+        provider: "chatgpt",
       }));
+      const batches: EvidenceBatch[] = [
+        {
+          missionId: "global-search",
+          provider: "chatgpt" as const,
+          candidates,
+          coveredMissionIds: plan.missions.map((mission) => mission.id),
+          status: "completed",
+          error: null,
+          searched: true,
+          cacheHit: false,
+          durationMs: Date.now() - startedAt,
+        },
+      ];
       await this.persistentCache?.set(cacheKey, batches, 30 * 60_000);
       this.onDiagnostics?.({
         missionCount: plan.missions.length,
         durationMs: Date.now() - startedAt,
-        sourceCount: unique.length,
+        sourceCount: candidates.length,
         cacheHit: false,
         outcome: "ready",
       });
@@ -177,7 +166,18 @@ export class NativeChatGptEvidenceRetriever implements EvidenceRetriever {
         outcome: "failed",
         error: error instanceof Error ? error.message : String(error),
       });
-      throw error;
+      if (signal.aborted) throw error;
+      yield {
+        missionId: "global-search",
+        provider: "chatgpt",
+        candidates: [],
+        coveredMissionIds: plan.missions.map((mission) => mission.id),
+        status: "failed",
+        error: error instanceof Error ? error.message : String(error),
+        searched: true,
+        cacheHit: false,
+        durationMs: Date.now() - startedAt,
+      };
     }
   }
 }

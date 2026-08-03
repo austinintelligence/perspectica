@@ -16,6 +16,7 @@ import { projectBias, projectReport, projectSourceList } from "./report/projecto
 import { synthesizePerspective } from "./synthesis/perspective";
 import { createTelemetry, noteTelemetry, type PipelineTelemetry } from "./telemetry";
 import type { LanguageModel } from "ai";
+import { adjudicateEvidence, type EvidenceAdjudicator } from "./evidence/adjudication";
 
 export interface AnalysisInput {
   article: ArticleDocument;
@@ -30,6 +31,7 @@ export interface AnalysisInput {
   createId?: () => string;
   onTelemetry?: (telemetry: PipelineTelemetry) => void;
   onArtifacts?: (artifacts: AnalysisArtifacts) => void | Promise<void>;
+  adjudicator?: EvidenceAdjudicator;
 }
 
 export interface AnalysisArtifacts {
@@ -49,6 +51,7 @@ export interface TargetedRetryInput {
   signal?: AbortSignal;
   now?: () => Date;
   onTelemetry?: (telemetry: PipelineTelemetry) => void;
+  adjudicator?: EvidenceAdjudicator;
 }
 
 function randomId(prefix: string): string {
@@ -132,7 +135,7 @@ export async function* analyzeArticle(input: AnalysisInput): AsyncGenerator<Pipe
       publishedAt: index.meta.publishedAt,
       contentType: index.meta.contentType,
     });
-    yield emit("worksCited.ready", projectSourceList(input.article));
+    yield emit("worksCited.ready", projectSourceList(index));
     yield emit("phase.changed", {
       phase: "planning",
       message: "Planning global research missions.",
@@ -151,7 +154,7 @@ export async function* analyzeArticle(input: AnalysisInput): AsyncGenerator<Pipe
     yield emit("lens.ready", {
       plan,
       provisionalCompass: plan.applicability.compass.applicable
-        ? projectReport(index, input.article, plan, preliminaryLedger).compass
+        ? projectReport(index, plan, preliminaryLedger).compass
         : null,
       provisionalBias: projectBias(plan),
       missionCount: plan.missions.length,
@@ -161,6 +164,7 @@ export async function* analyzeArticle(input: AnalysisInput): AsyncGenerator<Pipe
       message: `Checking ${plan.missions.length} evidence missions.`,
     });
     const ledger = preliminaryLedger;
+    const candidates = [];
     for await (const progress of runRetrieval({
       retriever: input.retriever,
       plan,
@@ -171,8 +175,10 @@ export async function* analyzeArticle(input: AnalysisInput): AsyncGenerator<Pipe
     })) {
       telemetry.searchCalls += progress.batch.searched ? 1 : 0;
       telemetry.cacheHits += progress.batch.cacheHit ? 1 : 0;
+      candidates.push(...progress.batch.candidates);
       const snapshot = ledger.snapshot();
       yield emit("research.progress", {
+        candidateCount: progress.candidateCount,
         completedMissions: progress.completedMissions,
         totalMissions: progress.totalMissions,
         acceptedSources: snapshot.sufficiency.acceptedSources,
@@ -183,9 +189,26 @@ export async function* analyzeArticle(input: AnalysisInput): AsyncGenerator<Pipe
         sourceCount: snapshot.sources.length,
         assertionCount: snapshot.assertions.length,
       });
-      if (snapshot.sufficiency.stop) break;
     }
     throwIfAborted(input.signal);
+    yield emit("phase.changed", {
+      phase: "adjudicating",
+      message: "Adjudicating candidate sources against exact article claims.",
+    });
+    const decisions = await adjudicateEvidence({
+      article: index,
+      plan,
+      candidates,
+      budget,
+      signal: input.signal,
+      adjudicator: input.adjudicator,
+    });
+    ledger.acceptAdjudications(decisions);
+    yield emit("ledger.updated", {
+      sourceCount: ledger.getSources().length,
+      assertionCount: ledger.getAssertions().length,
+      snapshot: ledger.snapshot(),
+    });
     await input.onArtifacts?.({
       analysisId,
       article: input.article,
@@ -194,10 +217,6 @@ export async function* analyzeArticle(input: AnalysisInput): AsyncGenerator<Pipe
       ledger,
       budget,
       telemetry,
-    });
-    yield emit("phase.changed", {
-      phase: "adjudicating",
-      message: "Comparing article framing with accepted evidence.",
     });
     const perspective = synthesizePerspective(index, plan, ledger);
     yield emit("perspective.ready", {
@@ -208,7 +227,7 @@ export async function* analyzeArticle(input: AnalysisInput): AsyncGenerator<Pipe
       phase: "composing",
       message: "Writing the report from the shared evidence graph.",
     });
-    const projected = projectReport(index, input.article, plan, ledger);
+    const projected = projectReport(index, plan, ledger);
     yield emit("section.ready", { section: "bias", data: projected.bias });
     yield emit("section.ready", {
       section: "journalist-context",
@@ -225,9 +244,18 @@ export async function* analyzeArticle(input: AnalysisInput): AsyncGenerator<Pipe
     });
     yield emit("worksCited.ready", projected.sourceList);
     const completedAt = now();
-    const failedSections: ReportSection[] = [];
-    const status =
-      ledger.getAssertions().length === 0 && plan.missions.length > 0 ? "partial" : "complete";
+    const failedSections = failedSectionsForReport(
+      [
+        "compass",
+        "bias",
+        "journalist-context",
+        "supporting",
+        "contradicting",
+        "additional-context",
+      ],
+      ledger,
+    );
+    const status = failedSections.length > 0 ? "partial" : "complete";
     yield emit("phase.changed", {
       phase: status === "complete" ? "complete" : "partial",
       message:
@@ -259,26 +287,13 @@ export async function* analyzeArticle(input: AnalysisInput): AsyncGenerator<Pipe
 
 function failedSectionsForReport(
   sections: readonly ReportSection[],
-  projected: ReturnType<typeof projectReport>,
+  ledger: EvidenceLedger,
 ): ReportSection[] {
-  return sections.filter((section) => {
-    switch (section) {
-      case "compass":
-        return projected.compass === null;
-      case "bias":
-        return projected.bias.status === "empty";
-      case "journalist-context":
-        return projected.journalistContext.status === "empty";
-      case "supporting":
-        return projected.evidence.supporting.status === "empty";
-      case "contradicting":
-        return projected.evidence.contradicting.status === "empty";
-      case "additional-context":
-        return projected.evidence.additionalContext.status === "empty";
-      case "works-cited":
-        return projected.sourceList.status === "empty";
-    }
-  });
+  return sections.filter((section) =>
+    ledger.plan.missions.some(
+      (mission) => ledger.isMissionFailed(mission.id) && mission.canServeSections.includes(section),
+    ),
+  );
 }
 
 /** Retry only requested report lanes against the existing evidence graph. */
@@ -297,6 +312,7 @@ export async function* retryArticleSections(
       phase: "retrieving",
       message: "Retrying only the incomplete research lanes.",
     });
+    const candidates = [];
     for await (const progress of retryRetrieval({
       retriever: input.retriever,
       plan: artifacts.plan,
@@ -307,8 +323,10 @@ export async function* retryArticleSections(
       now: () => now().valueOf(),
     })) {
       throwIfAborted(signal);
+      candidates.push(...progress.batch.candidates);
       const snapshot = artifacts.ledger.snapshot();
       yield emit("research.progress", {
+        candidateCount: progress.candidateCount,
         completedMissions: progress.completedMissions,
         totalMissions: progress.totalMissions,
         acceptedSources: snapshot.sufficiency.acceptedSources,
@@ -323,8 +341,17 @@ export async function* retryArticleSections(
     throwIfAborted(signal);
     yield emit("phase.changed", {
       phase: "adjudicating",
-      message: "Re-evaluating the requested lanes against accepted evidence.",
+      message: "Re-evaluating candidate sources against the requested lanes.",
     });
+    const decisions = await adjudicateEvidence({
+      article: artifacts.index,
+      plan: artifacts.plan,
+      candidates,
+      budget: artifacts.budget,
+      signal,
+      adjudicator: input.adjudicator,
+    });
+    artifacts.ledger.acceptAdjudications(decisions);
     const perspective = synthesizePerspective(artifacts.index, artifacts.plan, artifacts.ledger);
     yield emit("perspective.ready", {
       compass: perspective.compass,
@@ -334,12 +361,7 @@ export async function* retryArticleSections(
       phase: "composing",
       message: "Updating only the requested report sections.",
     });
-    const projected = projectReport(
-      artifacts.index,
-      artifacts.article,
-      artifacts.plan,
-      artifacts.ledger,
-    );
+    const projected = projectReport(artifacts.index, artifacts.plan, artifacts.ledger);
     const requestedSet = new Set(requested);
     if (requestedSet.has("bias"))
       yield emit("section.ready", { section: "bias", data: projected.bias });
@@ -366,7 +388,7 @@ export async function* retryArticleSections(
     }
     if (input.sections.includes("works-cited"))
       yield emit("worksCited.ready", projected.sourceList);
-    const failedSections = failedSectionsForReport(input.sections, projected).filter(
+    const failedSections = failedSectionsForReport(input.sections, artifacts.ledger).filter(
       (section) => section !== "works-cited",
     );
     const completedAt = now();

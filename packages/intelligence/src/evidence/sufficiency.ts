@@ -11,6 +11,7 @@ export function evaluateSufficiency(
   assertions: readonly EvidenceAssertion[],
   completedMissions: number,
   budget: AnalysisBudget,
+  candidateCount = 0,
 ): SufficiencySnapshot {
   const covered = new Set(
     assertions.flatMap((assertion) => (assertion.claimId ? [assertion.claimId] : [])),
@@ -32,6 +33,7 @@ export function evaluateSufficiency(
     totalClaims: plan.claims.length,
     meaningfulContradiction,
     exhaustedMissions: completedMissions,
+    candidateCount,
     stop,
     reason: stop
       ? coverage >= 0.75

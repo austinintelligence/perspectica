@@ -1,11 +1,11 @@
 import {
   BiasResultSchema,
   SourceListResultSchema,
-  type ArticleDocument,
   type BiasResult,
   type SourceListResult,
 } from "@perspectica/contracts";
 import type { ArticleIndex } from "@perspectica/contracts/article";
+import { normalizeCanonicalUrl } from "@perspectica/contracts/url";
 import type { AnalysisPlan } from "@perspectica/contracts/report";
 import { EvidenceLedger } from "../evidence/source-ledger";
 import {
@@ -63,30 +63,39 @@ export function projectBias(plan: AnalysisPlan): BiasResult {
   });
 }
 
-export function projectSourceList(article: ArticleDocument | ArticleIndex): SourceListResult {
-  const links =
-    "meta" in article
-      ? article.links
-      : article.links.map((link) => ({
-          id: link.id,
-          label: link.label,
-          url: link.url,
-          paragraphId: link.paragraphId,
-        }));
-  return SourceListResultSchema.parse({
-    status: "ready",
-    sources: links.slice(0, 20).map((link) => ({
+export function projectSourceList(article: ArticleIndex): SourceListResult {
+  const links = article.links
+    .filter((link) =>
+      ["external", "likely-primary", "same-publication"].includes(link.classification),
+    )
+    .filter((link) => link.classification !== "same-publication" || Boolean(link.paragraphId))
+    .map((link) => ({
       id: link.id,
       label: link.label,
-      url: link.url,
-      paragraphId: link.paragraphId ?? null,
-    })),
+      url: normalizeCanonicalUrl(link.url) ?? link.url,
+      paragraphId: link.paragraphId,
+    }));
+  const seen = new Set<string>();
+  return SourceListResultSchema.parse({
+    status: "ready",
+    sources: links
+      .filter((link) => {
+        if (seen.has(link.url)) return false;
+        seen.add(link.url);
+        return true;
+      })
+      .slice(0, 20)
+      .map((link) => ({
+        id: link.id,
+        label: link.label,
+        url: link.url,
+        paragraphId: link.paragraphId ?? null,
+      })),
   });
 }
 
 export function projectReport(
   index: ArticleIndex,
-  article: ArticleDocument,
   plan: AnalysisPlan,
   ledger: EvidenceLedger,
 ): ProjectedReport {
@@ -96,6 +105,6 @@ export function projectReport(
     bias: projectBias(plan),
     journalistContext: perspective.journalistContext,
     evidence: synthesizeEvidenceSections(ledger),
-    sourceList: projectSourceList(article),
+    sourceList: projectSourceList(index),
   };
 }

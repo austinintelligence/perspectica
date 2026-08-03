@@ -9,6 +9,7 @@ import { EvidenceLedger } from "../evidence/source-ledger";
 
 export interface RetrievalProgress {
   batch: EvidenceBatch;
+  candidateCount: number;
   completedMissions: number;
   totalMissions: number;
   ledger: EvidenceLedger;
@@ -51,13 +52,18 @@ export async function* runRetrieval(
         ? options.signal.reason
         : new DOMException("Aborted", "AbortError");
     options.ledger.accept(batch);
+    const candidateCount = options.ledger.getCandidates().length;
     yield {
       batch,
+      candidateCount,
       completedMissions: options.ledger.completedMissionCount(),
       totalMissions: options.plan.missions.length,
       ledger: options.ledger,
     };
-    if (options.ledger.isSufficient()) break;
+    // Retrieval remains streaming, but every planned mission is allowed to
+    // settle before adjudication so an unattempted lane is never reported as
+    // an honestly empty section. Provider-level deadlines and concurrency
+    // still bound the work.
   }
 }
 
@@ -75,23 +81,10 @@ export async function* retryMissingSections(
   options: TargetedRetryOptions,
 ): AsyncGenerator<RetrievalProgress> {
   const requested = new Set(options.sections);
-  const snapshot = options.ledger.snapshot();
-  const coveredMissionIds = new Set<string>();
-  for (const section of requested) {
-    if ((snapshot.servedSections[section] ?? []).length > 0) continue;
-    for (const mission of options.plan.missions) {
-      if (
-        mission.canServeSections.includes(section) &&
-        options.ledger.getAssertions().some((assertion) => assertion.missionId === mission.id)
-      ) {
-        coveredMissionIds.add(mission.id);
-      }
-    }
-  }
   const missions = options.plan.missions.filter(
     (mission) =>
       mission.canServeSections.some((section) => requested.has(section)) &&
-      !coveredMissionIds.has(mission.id),
+      options.ledger.isMissionFailed(mission.id),
   );
   if (missions.length === 0) return;
   yield* runRetrieval({ ...options, plan: { ...options.plan, missions } });

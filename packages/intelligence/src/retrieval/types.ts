@@ -1,6 +1,6 @@
 export type {
   EvidenceBatch,
-  EvidenceCard,
+  EvidenceCandidate,
   EvidenceProvider,
   EvidenceRetriever,
   RetrievalMission,

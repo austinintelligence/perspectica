@@ -7,6 +7,7 @@ import {
   retryArticleSections,
   type AnalysisArtifacts,
 } from "./index";
+import type { EvidenceAdjudicator } from "./evidence/adjudication";
 
 function article() {
   return ArticleDocumentSchema.parse({
@@ -59,32 +60,33 @@ function retriever() {
   return {
     async *retrieve(plan: RetrievalPlan, _signal: AbortSignal): AsyncIterable<EvidenceBatch> {
       for (const [index, mission] of plan.missions.entries()) {
-        const content = `Independent record ${index + 1} confirms the bounded claim tested by ${mission.id}.`;
+        const content = `Independent record ${index + 1} confirms: The city council approved a public housing investment after a 2026 vote.`;
         yield {
           missionId: mission.id,
           provider: "exa",
           searched: true,
           cacheHit: false,
           durationMs: 2,
-          cards: [
+          candidates: [
             {
+              id: `candidate-${index + 1}`,
               missionId: mission.id,
-              claimId: mission.claimIds[0] ?? null,
               sourceUrl: `https://evidence.example/source-${index + 1}`,
               title: `Evidence ${index + 1}`,
               publication: "Evidence Daily",
               publishedAt: null,
-              statement: content,
-              excerpt: content,
               content,
               contentKind: "source-text",
-              relationship:
-                mission.purpose === "correction-or-qualification" ? "qualifies" : "supports",
               sourceType: "independent-reporting",
-              confidence: 0.8,
+              discoveryContext: null,
+              discoveryExcerpt: content,
+              providerScore: 0.8,
               provider: "exa",
             },
           ],
+          coveredMissionIds: [mission.id],
+          status: "completed",
+          error: null,
         };
       }
     },
@@ -92,6 +94,29 @@ function retriever() {
 }
 
 describe("V2 intelligence pipeline", () => {
+  const adjudicator: EvidenceAdjudicator = {
+    async adjudicate({ candidates, plan }) {
+      return candidates.flatMap((candidate) => {
+        const mission = plan.missions.find((value) => value.id === candidate.missionId);
+        if (!mission?.claimIds[0]) return [];
+        return [
+          {
+            candidateId: candidate.id,
+            missionId: mission.id,
+            claimId: mission.claimIds[0],
+            relationship:
+              mission.purpose === "correction-or-qualification" ? "qualifies" : "supports",
+            statement: "The source reports the same central claim tested in the article.",
+            excerpt: candidate.content,
+            confidence: 0.8,
+            relevance: 0.85,
+            context: null,
+          },
+        ];
+      });
+    },
+  };
+
   it("uses one index, bounded planning, a shared ledger, and explicit phases", async () => {
     const events = [];
     for await (const event of analyzeArticle({
@@ -101,6 +126,7 @@ describe("V2 intelligence pipeline", () => {
       reasoningEffort: "low",
       now: () => new Date("2026-08-02T12:00:00.000Z"),
       createId: () => "plan-fixture",
+      adjudicator,
     }))
       events.push(event);
 
@@ -142,6 +168,7 @@ describe("V2 intelligence pipeline", () => {
     for await (const event of analyzeArticle({
       article: article(),
       retriever: retriever(),
+      adjudicator,
       signal: controller.signal,
     }))
       events.push(event);
@@ -156,7 +183,10 @@ describe("V2 intelligence pipeline", () => {
           yield {
             missionId: mission.id,
             provider: "exa" as const,
-            cards: [],
+            candidates: [],
+            coveredMissionIds: [mission.id],
+            status: "failed",
+            error: "provider unavailable",
             searched: true,
             cacheHit: false,
             durationMs: 1,
@@ -191,5 +221,45 @@ describe("V2 intelligence pipeline", () => {
     expect(retryEvents.some((event) => event.type === "lens.ready")).toBe(false);
     expect(retryEvents.some((event) => event.type === "research.progress")).toBe(true);
     expect(retryEvents.some((event) => event.type === "section.ready")).toBe(true);
+
+    let emptyArtifacts: AnalysisArtifacts | undefined;
+    const honestlyEmptyRetriever = {
+      async *retrieve(plan: RetrievalPlan): AsyncIterable<EvidenceBatch> {
+        for (const mission of plan.missions) {
+          yield {
+            missionId: mission.id,
+            provider: "exa" as const,
+            candidates: [],
+            coveredMissionIds: [mission.id],
+            status: "completed" as const,
+            error: null,
+            searched: true,
+            cacheHit: false,
+            durationMs: 1,
+          };
+        }
+      },
+    };
+    for await (const _event of analyzeArticle({
+      article: article(),
+      retriever: honestlyEmptyRetriever,
+      mode: "fast",
+      reasoningEffort: "low",
+      onArtifacts: (value) => {
+        emptyArtifacts = value;
+      },
+    })) {
+      // Drain the complete empty run before checking targeted retry behavior.
+    }
+    expect(emptyArtifacts).toBeDefined();
+    if (!emptyArtifacts) return;
+    const emptyRetryEvents = [];
+    for await (const event of retryArticleSections({
+      artifacts: emptyArtifacts,
+      retriever: retriever(),
+      sections: ["contradicting"],
+    }))
+      emptyRetryEvents.push(event);
+    expect(emptyRetryEvents.some((event) => event.type === "research.progress")).toBe(false);
   });
 });

@@ -2,6 +2,23 @@ import { z } from "zod";
 
 const text = z.string().trim().min(1);
 
+export const ArticleBiasTechniqueSchema = z.enum([
+  "word-choice",
+  "speculation",
+  "unsubstantiated-claims",
+  "cherry-picking",
+  "source-selection",
+  "whataboutism",
+  "false-balance",
+  "false-dichotomy",
+  "flawed-comparison",
+  "generalization",
+  "ad-hominem",
+  "emotional-sensationalism",
+  "straw-man",
+]);
+export type ArticleBiasTechnique = z.infer<typeof ArticleBiasTechniqueSchema>;
+
 export const ReportSectionSchema = z.enum([
   "compass",
   "bias",
@@ -33,7 +50,7 @@ export type ArticleCompassSignal = z.infer<typeof ArticleCompassSignalSchema>;
 
 export const ArticleBiasSignalSchema = z.object({
   id: text.max(160),
-  technique: text.max(120),
+  technique: ArticleBiasTechniqueSchema,
   paragraphId: text.max(128),
   sentenceId: text.max(160).nullable(),
   excerpt: text.max(4_000),

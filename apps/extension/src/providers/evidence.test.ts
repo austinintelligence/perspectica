@@ -56,11 +56,13 @@ describe("V2 evidence providers", () => {
       batches.push(batch);
 
     expect(fetchImplementation).toHaveBeenCalledTimes(1);
-    expect(batches[0]?.cards[0]).toMatchObject({
+    expect(batches[0]?.candidates[0]).toMatchObject({
       sourceUrl: "https://city.gov/record",
       contentKind: "source-text",
-      excerpt: "The council approved the housing plan.",
+      discoveryExcerpt: "The council approved the housing plan.",
     });
+    expect(batches[0]?.candidates[0]).not.toHaveProperty("relationship");
+    expect(batches[0]?.candidates[0]).not.toHaveProperty("statement");
   });
 
   it("makes one native global search call and emits non-quoteable summaries", async () => {
@@ -78,10 +80,12 @@ describe("V2 evidence providers", () => {
       batches.push(batch);
 
     expect(generateText).toHaveBeenCalledTimes(1);
-    expect(batches[0]?.cards[0]).toMatchObject({
+    expect(batches[0]?.candidates[0]).toMatchObject({
       contentKind: "search-summary",
-      excerpt: null,
       sourceUrl: "https://city.gov/record",
+      missionId: null,
     });
+    expect(batches[0]?.candidates[0]).not.toHaveProperty("relationship");
+    expect(batches[0]?.candidates[0]).not.toHaveProperty("excerpt");
   });
 });

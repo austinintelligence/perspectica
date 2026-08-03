@@ -8,6 +8,8 @@ export * from "./retrieval/coordinator";
 export * from "./retrieval/scheduler";
 export * from "./evidence/source-ledger";
 export * from "./evidence/validation";
+export * from "./evidence/normalization";
+export * from "./evidence/adjudication";
 export * from "./evidence/sufficiency";
 export * from "./synthesis/perspective";
 export * from "./synthesis/evidence-sections";
