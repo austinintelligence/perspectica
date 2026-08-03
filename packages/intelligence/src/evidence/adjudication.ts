@@ -113,8 +113,15 @@ export async function adjudicateEvidence(
 ): Promise<EvidenceAdjudication[]> {
   if (!input.adjudicator || input.candidates.length === 0) return [];
   const maxCandidatesPerCall = 6;
+  // The Article Lens consumes the first model step. Reserve it so the
+  // aggregate analysis never exceeds the depth's model-call ceiling.
+  const maxAdjudicationCalls = Math.max(0, input.budget.maxModelSteps - 1);
   const decisions: EvidenceAdjudication[] = [];
-  for (let offset = 0; offset < input.candidates.length; offset += maxCandidatesPerCall) {
+  for (
+    let offset = 0, calls = 0;
+    offset < input.candidates.length && calls < maxAdjudicationCalls;
+    offset += maxCandidatesPerCall, calls += 1
+  ) {
     const batch = input.candidates.slice(offset, offset + maxCandidatesPerCall);
     decisions.push(
       ...(await input.adjudicator.adjudicate({

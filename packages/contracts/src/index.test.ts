@@ -8,6 +8,7 @@ import {
   normalizeCanonicalUrl,
 } from "./index";
 import { EvidenceProviderSchema } from "./evidence";
+import { ANALYSIS_LIMITS } from "./limits";
 
 const baseArticle = {
   fingerprint: "fixture",
@@ -159,9 +160,22 @@ describe("ExternalSourceSchema", () => {
 describe("V2 research depth and providers", () => {
   it("exposes the four bounded depth profiles", () => {
     expect(ResearchDepthSchema.options).toEqual(["quick", "balanced", "deep", "verified"]);
-    expect(RESEARCH_PROFILES.quick.maxModelSteps).toBe(4);
+    expect(RESEARCH_PROFILES.quick.maxModelSteps).toBe(2);
     expect(RESEARCH_PROFILES.verified.maxOutputTokens).toBe(4_000);
-    expect(RESEARCH_PROFILES.verified.specialistTimeoutMs).toBe(180_000);
+    expect(RESEARCH_PROFILES.verified.specialistTimeoutMs).toBe(600_000);
+    expect(
+      (["quick", "balanced", "deep", "verified"] as const).map((depth) => [
+        ANALYSIS_LIMITS[depth].maxMissions,
+        ANALYSIS_LIMITS[depth].maxSources,
+        ANALYSIS_LIMITS[depth].maxModelSteps,
+        ANALYSIS_LIMITS[depth].totalDeadlineMs,
+      ]),
+    ).toEqual([
+      [1, 2, 2, 90_000],
+      [3, 5, 3, 180_000],
+      [5, 8, 5, 360_000],
+      [8, 12, 6, 600_000],
+    ]);
   });
 
   it("accepts all canonical evidence providers", () => {

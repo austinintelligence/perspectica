@@ -233,10 +233,17 @@ function deterministicPlan(
     );
   }
   if (claims.length > 0) {
+    const verificationClaims = claims
+      .filter((claim) =>
+        claim.paragraphIds.some((paragraphId) => index.paragraphs[paragraphId]?.kind !== "quote"),
+      )
+      .slice(0, 3);
     missions.push(
       mission(
         "mission-verify",
-        claims.slice(0, 3).map((claim) => claim.id),
+        (verificationClaims.length > 0 ? verificationClaims : claims.slice(0, 3)).map(
+          (claim) => claim.id,
+        ),
         "independent-verification",
         claims
           .slice(0, 3)
@@ -336,6 +343,14 @@ function deterministicPlan(
       reason: "Article links are always projected as works cited.",
     },
   } as const;
+  const orderedMissions = missions.sort((left, right) => right.priority - left.priority);
+  const boundedMissions =
+    budget.maxMissions === 1
+      ? [
+          orderedMissions.find((mission) => mission.purpose === "independent-verification") ??
+            orderedMissions[0],
+        ].filter((mission): mission is ResearchMission => Boolean(mission))
+      : orderedMissions.slice(0, budget.maxMissions);
   const plan: AnalysisPlan = {
     id: createId(),
     overview: compact(
@@ -344,9 +359,7 @@ function deterministicPlan(
     ),
     claims,
     articleSignals: signals,
-    missions: missions
-      .sort((left, right) => right.priority - left.priority)
-      .slice(0, budget.maxMissions),
+    missions: boundedMissions,
     applicability,
     unresolvedQuestions: claims
       .slice(0, 4)

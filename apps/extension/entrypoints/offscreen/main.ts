@@ -22,6 +22,10 @@ import {
 import { ExaEvidenceRetriever } from "../../src/providers/exa-evidence";
 import { NativeChatGptEvidenceRetriever } from "../../src/providers/chatgpt-evidence";
 import { FreeEvidenceRetriever } from "../../src/providers/free-evidence";
+import {
+  FallbackEvidenceRetriever,
+  type ProviderFallbackDiagnostics,
+} from "../../src/providers/fallback-evidence";
 import { IndexedDbAnalysisArtifactStore } from "../../src/storage/analysis-artifacts";
 import { EvidenceCache } from "../../src/storage/evidence-cache";
 import { describeError, redactText, serializeRedacted } from "../../src/runtime/redaction";
@@ -173,62 +177,80 @@ async function createRetriever(
     textVerbosity: "low",
   });
   const cache = cacheForRun(jobId, runToken, cacheScope);
+  const freeRetriever = () =>
+    new FreeEvidenceRetriever(
+      globalThis.fetch.bind(globalThis),
+      (diagnostics) => {
+        void queueTelemetry(jobId, runToken, {
+          level: diagnostics.outcome === "failed" ? "error" : "debug",
+          scope: "provider.free",
+          event: `mission.${diagnostics.outcome}`,
+          message: `Free research mission ${diagnostics.missionId} ${diagnostics.outcome}.`,
+          payload: serializeRedacted(diagnostics),
+        });
+      },
+      cache,
+    );
+  const fallbackTelemetry = (diagnostics: ProviderFallbackDiagnostics) => {
+    void queueTelemetry(jobId, runToken, {
+      level: "warn",
+      scope: "provider.fallback",
+      event: `${diagnostics.primaryProvider}->${diagnostics.fallbackProvider}.${diagnostics.reason}`,
+      message: `The ${diagnostics.primaryProvider} provider returned no usable mission results; free retrieval was attempted.`,
+      payload: serializeRedacted(diagnostics),
+    });
+  };
   if (providerKind === "exa") {
     const secret = await sendInternal<{ apiKey: string }>({
       type: "internal.providers.getSecret",
       provider: "exa",
     });
+    const primary = new ExaEvidenceRetriever(
+      secret.apiKey,
+      undefined,
+      (diagnostics) => {
+        void queueTelemetry(jobId, runToken, {
+          level: diagnostics.outcome === "failed" ? "error" : "debug",
+          scope: "provider.exa",
+          event: `mission.${diagnostics.outcome}`,
+          message: `Exa mission ${diagnostics.missionId} ${diagnostics.outcome}.`,
+          payload: serializeRedacted(diagnostics),
+        });
+      },
+      cache,
+    );
     return {
       model: chatgpt(modelId),
-      retriever: new ExaEvidenceRetriever(
-        secret.apiKey,
-        undefined,
-        (diagnostics) => {
-          void queueTelemetry(jobId, runToken, {
-            level: diagnostics.outcome === "failed" ? "error" : "debug",
-            scope: "provider.exa",
-            event: `mission.${diagnostics.outcome}`,
-            message: `Exa mission ${diagnostics.missionId} ${diagnostics.outcome}.`,
-            payload: serializeRedacted(diagnostics),
-          });
-        },
-        cache,
-      ),
+      retriever: new FallbackEvidenceRetriever("exa", primary, freeRetriever(), fallbackTelemetry),
     };
   }
   if (providerKind === "free") {
     return {
       model: chatgpt(modelId),
-      retriever: new FreeEvidenceRetriever(
-        globalThis.fetch.bind(globalThis),
-        (diagnostics) => {
-          void queueTelemetry(jobId, runToken, {
-            level: diagnostics.outcome === "failed" ? "error" : "debug",
-            scope: "provider.free",
-            event: `mission.${diagnostics.outcome}`,
-            message: `Free research mission ${diagnostics.missionId} ${diagnostics.outcome}.`,
-            payload: serializeRedacted(diagnostics),
-          });
-        },
-        cache,
-      ),
+      retriever: freeRetriever(),
     };
   }
+  const primary = new NativeChatGptEvidenceRetriever(
+    chatgpt,
+    modelId,
+    (diagnostics) => {
+      void queueTelemetry(jobId, runToken, {
+        level: diagnostics.outcome === "failed" ? "error" : "debug",
+        scope: "provider.chatgpt",
+        event: `global-search.${diagnostics.outcome}`,
+        message: "Native ChatGPT global search completed.",
+        payload: serializeRedacted(diagnostics),
+      });
+    },
+    cache,
+  );
   return {
     model: chatgpt(modelId),
-    retriever: new NativeChatGptEvidenceRetriever(
-      chatgpt,
-      modelId,
-      (diagnostics) => {
-        void queueTelemetry(jobId, runToken, {
-          level: diagnostics.outcome === "failed" ? "error" : "debug",
-          scope: "provider.chatgpt",
-          event: `global-search.${diagnostics.outcome}`,
-          message: "Native ChatGPT global search completed.",
-          payload: serializeRedacted(diagnostics),
-        });
-      },
-      cache,
+    retriever: new FallbackEvidenceRetriever(
+      "chatgpt",
+      primary,
+      freeRetriever(),
+      fallbackTelemetry,
     ),
   };
 }
