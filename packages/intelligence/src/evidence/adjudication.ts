@@ -10,7 +10,7 @@ import type { AnalysisPlan } from "@perspectica/contracts/report";
 import type { AnalysisBudget } from "../budgets";
 
 const AdjudicationOutputSchema = z.object({
-  decisions: z.array(EvidenceAdjudicationSchema).max(96),
+  decisions: z.array(EvidenceAdjudicationSchema).max(8),
 });
 
 export interface EvidenceAdjudicationInput {
@@ -51,7 +51,7 @@ function buildPrompt(input: EvidenceAdjudicationInput): string {
     .slice(0, Math.max(input.budget.maxSources * 4, 24))
     .map(
       (candidate) =>
-        `CANDIDATE ${candidate.id} mission=${candidate.missionId ?? "global-search"} url=${candidate.sourceUrl} title=${compact(candidate.title, 300)} kind=${candidate.contentKind} sourceType=${candidate.sourceType}\nCONTENT: ${compact(candidate.content, 4_000)}\nDISCOVERY: ${compact(candidate.discoveryContext ?? "", 2_000)}`,
+        `CANDIDATE ${candidate.id} mission=${candidate.missionId ?? "global-search"} url=${candidate.sourceUrl} title=${compact(candidate.title, 300)} kind=${candidate.contentKind} sourceType=${candidate.sourceType}\nCONTENT: ${compact(candidate.content, 2_400)}\nDISCOVERY: ${compact(candidate.discoveryContext ?? "", 600)}`,
     )
     .join("\n\n");
   return [
@@ -73,6 +73,7 @@ const SYSTEM_PROMPT = [
   "Supports, contradicts, and qualifies require an exact planned claim and a clear source-content anchor.",
   "Use context only for journalist-work, publication-history, comparable-coverage, or topic-context that is explicitly present in the candidate.",
   "Return no decision for irrelevant, ambiguous, self-referential, or discovery-only candidates. Do not write generic discovery prose such as 'surfaced a relevant source'.",
+  "Return at most one short decision per candidate. Keep source excerpts contiguous and as short as possible (preferably under 600 characters).",
   "Every candidateId and missionId must be copied exactly from the input. Do not invent IDs.",
 ].join(" ");
 
@@ -111,5 +112,16 @@ export async function adjudicateEvidence(
   input: EvidenceAdjudicationInput & { adjudicator?: EvidenceAdjudicator },
 ): Promise<EvidenceAdjudication[]> {
   if (!input.adjudicator || input.candidates.length === 0) return [];
-  return input.adjudicator.adjudicate(input);
+  const maxCandidatesPerCall = 6;
+  const decisions: EvidenceAdjudication[] = [];
+  for (let offset = 0; offset < input.candidates.length; offset += maxCandidatesPerCall) {
+    const batch = input.candidates.slice(offset, offset + maxCandidatesPerCall);
+    decisions.push(
+      ...(await input.adjudicator.adjudicate({
+        ...input,
+        candidates: batch,
+      })),
+    );
+  }
+  return decisions;
 }
