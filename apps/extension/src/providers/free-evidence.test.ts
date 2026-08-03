@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { RetrievalPlan } from "@perspectica/contracts/evidence";
-import { FreeEvidenceRetriever, isSafePublisherUrl, readBounded } from "./free-evidence";
+import {
+  FreeEvidenceRetriever,
+  isSafePublisherUrl,
+  readBounded,
+  toGdeltQuery,
+} from "./free-evidence";
 
 const plan: RetrievalPlan = {
   missions: [
@@ -32,6 +37,20 @@ describe("free V2 evidence retrieval", () => {
     expect(isSafePublisherUrl("https://[::ffff:127.0.0.1]/report")).toBe(false);
     expect(isSafePublisherUrl("https://[::ffff:7f00:1]/report")).toBe(false);
     expect(isSafePublisherUrl("https://user:secret@example.com/report")).toBe(false);
+  });
+
+  it("converts verbose web searches into bounded GDELT queries", () => {
+    expect(
+      toGdeltQuery(
+        'site:justice.gov "Robert Hur" official report Biden classified documents willful retention disclosure',
+      ),
+    ).toBe('domainis:justice.gov "Robert Hur" Biden classified documents willful');
+    expect(
+      toGdeltQuery(
+        'site:justice.gov "Robert Hur" official report Biden classified documents willful retention disclosure',
+        false,
+      ),
+    ).toBe('"Robert Hur" Biden classified documents willful');
   });
 
   it("stops reading a chunked response once the byte budget is exceeded", async () => {
@@ -86,6 +105,69 @@ describe("free V2 evidence retrieval", () => {
     });
     expect(batches[0]?.candidates[0]?.discoveryExcerpt).toBeTruthy();
     expect(batches[0]?.candidates[0]).not.toHaveProperty("relationship");
+  });
+
+  it("retries an empty exact-domain GDELT query with a bounded relaxed variant", async () => {
+    const retryPlan: RetrievalPlan = {
+      ...plan,
+      missions: [
+        {
+          ...plan.missions[0]!,
+          queryVariants: [
+            "site:justice.gov Robert Hur official report Biden classified documents willful retention",
+          ],
+        },
+      ],
+    };
+    const fetchImplementation = vi.fn(async (input: URL | RequestInfo) => {
+      const url = String(input);
+      if (url.includes("gdeltproject")) {
+        const query = new URL(url).searchParams.get("query") ?? "";
+        return new Response(
+          JSON.stringify({
+            articles: query.startsWith("domainis:")
+              ? []
+              : [{ url: "https://news.example/independent-report", title: "Independent report" }],
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+      if (url.includes("duckduckgo")) {
+        return new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(
+        "<article><p>This independent publisher report contains enough source text for downstream validation and cautious citation.</p></article>",
+        { status: 200, headers: { "content-type": "text/html" } },
+      );
+    });
+    const retriever = new FreeEvidenceRetriever(
+      fetchImplementation as typeof fetch,
+      undefined,
+      undefined,
+      0,
+    );
+    const batches = [];
+    for await (const batch of retriever.retrieve(retryPlan, new AbortController().signal))
+      batches.push(batch);
+
+    expect(batches[0]?.candidates[0]).toMatchObject({
+      sourceUrl: "https://news.example/independent-report",
+      title: "Independent report",
+      contentKind: "source-text",
+      provider: "free",
+    });
+    const gdeltCalls = fetchImplementation.mock.calls
+      .map(([input]) => String(input))
+      .filter((url) => url.includes("gdeltproject"));
+    expect(gdeltCalls).toHaveLength(2);
+    expect(new URL(gdeltCalls[0]!).searchParams.get("query")).toContain("domainis:justice.gov");
+    expect(new URL(gdeltCalls[1]!).searchParams.get("query")).not.toContain("domainis:");
   });
 
   it("keeps discovery-only summaries non-quoteable", async () => {

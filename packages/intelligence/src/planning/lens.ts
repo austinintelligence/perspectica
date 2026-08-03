@@ -436,7 +436,7 @@ export async function createAnalysisPlan(
   fallback.contextCharacters = context.characters;
   if (!options.model) return AnalysisPlanSchema.parse(fallback);
   const prompt = buildLensPrompt(index, context, budget);
-  options.onUsage?.({ phase: "lens", inputCharacters: prompt.length, outputCharacters: 0 });
+  let usageReported = false;
   try {
     const result = streamText({
       model: options.model,
@@ -447,13 +447,15 @@ export async function createAnalysisPlan(
       maxOutputTokens: budget.modelOutputTokens,
       maxRetries: 1,
       timeout: {
+        // The selected research depth owns the real deadline. Do not turn the
+        // 30-second UX target into a stream-chunk timeout: reasoning models can
+        // remain quiet while still making useful progress.
         totalMs: Math.min(budget.specialistTimeoutMs, budget.totalDeadlineMs),
-        firstChunkMs: Math.min(30_000, budget.specialistTimeoutMs),
-        chunkMs: Math.min(15_000, budget.specialistTimeoutMs),
       },
     });
     for await (const _ of result.partialOutputStream) options.signal?.throwIfAborted();
     const plan = AnalysisPlanSchema.parse(await result.output);
+    usageReported = true;
     options.onUsage?.({
       phase: "lens",
       inputCharacters: prompt.length,
@@ -461,6 +463,9 @@ export async function createAnalysisPlan(
     });
     return normalizePlan(plan, index, budget, fallback);
   } catch {
+    if (!usageReported) {
+      options.onUsage?.({ phase: "lens", inputCharacters: prompt.length, outputCharacters: 0 });
+    }
     // A deterministic plan is a valid bounded fallback. Retrieval is never
     // replaced by a section-wide legacy dossier after this point.
     return fallback;

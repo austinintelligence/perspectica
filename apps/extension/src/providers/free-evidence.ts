@@ -15,6 +15,25 @@ const MAX_RESULT_CONTENT = 14_000;
 const MAX_RESPONSE_BYTES = 1_500_000;
 const MAX_FETCH_URLS = 4;
 const MAX_REDIRECTS = 3;
+const MAX_GDELT_QUERY_TERMS = 5;
+
+const GDELT_STOP_WORDS = new Set([
+  "about",
+  "according",
+  "analysis",
+  "article",
+  "context",
+  "coverage",
+  "evidence",
+  "independent",
+  "latest",
+  "official",
+  "report",
+  "reporting",
+  "source",
+  "verify",
+  "with",
+]);
 
 export interface FreeEvidenceDiagnostics {
   missionId: string;
@@ -213,27 +232,86 @@ interface DiscoveryResult {
   note: string;
 }
 
+function normalizedDomain(value: string): string | null {
+  const candidate = value
+    .trim()
+    .toLocaleLowerCase("en-US")
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "")
+    .replace(/\/.*$/, "");
+  return /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(candidate) ? candidate : null;
+}
+
+/**
+ * GDELT treats whitespace-separated words as an AND query. Model-authored web
+ * searches are often much longer, so passing one through verbatim produces no
+ * results. Keep the strongest bounded terms and translate familiar `site:`
+ * syntax to GDELT's documented exact-domain operator.
+ */
+export function toGdeltQuery(value: string, preserveDomain = true): string {
+  const domains = [...value.matchAll(/\b(?:site|domain(?:is)?):([^\s]+)/gi)]
+    .map((match) => normalizedDomain(match[1] ?? ""))
+    .filter((domain): domain is string => Boolean(domain));
+  const withoutOperators = value
+    .replace(/\b(?:site|domain(?:is)?):[^\s]+/gi, " ")
+    .replace(/[(){}[\]]/g, " ");
+  const quoted = [...withoutOperators.matchAll(/"([^"\n]{3,100})"/g)]
+    .map((match) => text(match[1]))
+    .filter(Boolean)
+    .slice(0, 1);
+  const unquoted = withoutOperators
+    .replace(/"[^"\n]*"/g, " ")
+    .match(/[\p{L}\p{N}][\p{L}\p{N}.'’-]{2,}/gu);
+  const terms = [...quoted.map((term) => `"${term.replace(/"/g, "")}"`), ...(unquoted ?? [])]
+    .filter((term) => !GDELT_STOP_WORDS.has(term.toLocaleLowerCase("en-US")))
+    .filter(
+      (term, index, all) =>
+        all.findIndex((candidate) => candidate.toLowerCase() === term.toLowerCase()) === index,
+    )
+    .slice(0, MAX_GDELT_QUERY_TERMS);
+  const domain = preserveDomain ? domains[0] : null;
+  return [`${domain ? `domainis:${domain}` : ""}`, ...terms].filter(Boolean).join(" ").trim();
+}
+
 export class FreeEvidenceRetriever implements EvidenceRetriever {
   private readonly cache = new Map<string, { expiresAt: number; results: EvidenceCandidate[] }>();
   private lastGdeltAt = 0;
+  private gdeltQueue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly fetchImplementation: typeof fetch = globalThis.fetch.bind(globalThis),
     private readonly onDiagnostics?: (diagnostics: FreeEvidenceDiagnostics) => void,
     private readonly persistentCache?: EvidenceResultCache,
+    private readonly gdeltMinIntervalMs = GDELT_MIN_INTERVAL_MS,
   ) {}
 
-  private async delayForGdelt(signal: AbortSignal): Promise<void> {
-    const waitMs = Math.max(0, this.lastGdeltAt + GDELT_MIN_INTERVAL_MS - Date.now());
-    if (waitMs === 0) return;
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(resolve, waitMs);
-      const onAbort = () => {
-        clearTimeout(timer);
-        reject(abortError());
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
+  private async reserveGdeltSlot(signal: AbortSignal): Promise<void> {
+    const previous = this.gdeltQueue;
+    let release: () => void = () => {};
+    this.gdeltQueue = new Promise<void>((resolve) => {
+      release = resolve;
     });
+    try {
+      await previous;
+      if (signal.aborted) throw abortError();
+      const waitMs = Math.max(0, this.lastGdeltAt + this.gdeltMinIntervalMs - Date.now());
+      if (waitMs > 0) {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            signal.removeEventListener("abort", onAbort);
+            resolve();
+          }, waitMs);
+          const onAbort = () => {
+            clearTimeout(timer);
+            reject(abortError());
+          };
+          signal.addEventListener("abort", onAbort, { once: true });
+        });
+      }
+      this.lastGdeltAt = Date.now();
+    } finally {
+      release();
+    }
   }
 
   private async gdelt(
@@ -241,8 +319,10 @@ export class FreeEvidenceRetriever implements EvidenceRetriever {
     maxResults: number,
     signal: AbortSignal,
   ): Promise<DiscoveryResult[]> {
-    await this.delayForGdelt(signal);
-    this.lastGdeltAt = Date.now();
+    // GDELT documents a conservative request cadence. Serialize reservation
+    // rather than relying on a timestamp check that concurrent missions can
+    // all pass in the same event-loop turn.
+    await this.reserveGdeltSlot(signal);
     const endpoint = new URL("https://api.gdeltproject.org/api/v2/doc/doc");
     endpoint.searchParams.set("query", query.slice(0, 400));
     endpoint.searchParams.set("mode", "artlist");
@@ -355,10 +435,11 @@ export class FreeEvidenceRetriever implements EvidenceRetriever {
     signal: AbortSignal,
   ): Promise<EvidenceBatch> {
     const startedAt = Date.now();
-    const query = mission.queryVariants[0]?.trim() || "independent context";
+    const queryVariants = mission.queryVariants.map((value) => value.trim()).filter(Boolean);
+    const query = queryVariants[0] || "independent context";
     const cacheKey = JSON.stringify({
       provider: "free",
-      query,
+      queries: queryVariants,
       mission: mission.purpose,
       include: mission.includeDomains,
       exclude: mission.excludeDomains,
@@ -409,22 +490,34 @@ export class FreeEvidenceRetriever implements EvidenceRetriever {
       });
     }
 
-    const [gdelt, answer] = await Promise.all([
-      this.gdelt(query, Math.min(plan.maxSources, 10), signal),
+    const gdeltQueries = [
+      ...new Set(
+        queryVariants
+          .slice(0, 2)
+          .flatMap((value) => [toGdeltQuery(value, true), toGdeltQuery(value, false)])
+          .filter(Boolean),
+      ),
+    ].slice(0, 2);
+    const [firstGdelt, answer] = await Promise.all([
+      this.gdelt(gdeltQueries[0] || toGdeltQuery(query), Math.min(plan.maxSources, 10), signal),
       this.duckDuckGo(query, signal),
     ]);
+    const gdelt =
+      firstGdelt.length === 0 && gdeltQueries[1]
+        ? await this.gdelt(gdeltQueries[1], Math.min(plan.maxSources, 10), signal)
+        : firstGdelt;
     const discoveries = [...new Map([...gdelt, ...answer].map((item) => [item.url, item])).values()]
-      .filter(
-        (item) =>
-          !mission.excludeDomains.some((domain) => {
-            const host = new URL(item.url).hostname.replace(/^www\./, "");
-            const excluded = domain
-              .trim()
-              .toLocaleLowerCase("en-US")
-              .replace(/^www\./, "");
-            return host === excluded || host.endsWith(`.${excluded}`);
-          }),
-      )
+      .filter((item) => {
+        const host = new URL(item.url).hostname.replace(/^www\./, "");
+        const included = mission.includeDomains
+          .map(normalizedDomain)
+          .filter((domain): domain is string => Boolean(domain));
+        const excluded = mission.excludeDomains
+          .map(normalizedDomain)
+          .filter((domain): domain is string => Boolean(domain));
+        const matches = (domain: string) => host === domain || host.endsWith(`.${domain}`);
+        return (included.length === 0 || included.some(matches)) && !excluded.some(matches);
+      })
       .slice(0, Math.min(MAX_FETCH_URLS, Math.max(1, plan.maxSources)));
     const fetched = await Promise.all(
       discoveries.map(async (item) => ({

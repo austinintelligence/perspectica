@@ -94,8 +94,6 @@ export function createModelEvidenceAdjudicator(
         maxOutputTokens: input.budget.modelOutputTokens,
         timeout: {
           totalMs: Math.min(input.budget.specialistTimeoutMs, input.budget.totalDeadlineMs),
-          firstChunkMs: Math.min(30_000, input.budget.specialistTimeoutMs),
-          chunkMs: Math.min(15_000, input.budget.specialistTimeoutMs),
         },
       });
       const decisions = result.output?.decisions ?? [];
@@ -109,7 +107,11 @@ export function createModelEvidenceAdjudicator(
 }
 
 export async function adjudicateEvidence(
-  input: EvidenceAdjudicationInput & { adjudicator?: EvidenceAdjudicator },
+  input: EvidenceAdjudicationInput & {
+    adjudicator?: EvidenceAdjudicator;
+    onAttempt?: (candidateCount: number) => void;
+    onFailure?: (error: unknown, candidates: readonly EvidenceCandidate[]) => void;
+  },
 ): Promise<EvidenceAdjudication[]> {
   if (!input.adjudicator || input.candidates.length === 0) return [];
   const maxCandidatesPerCall = 6;
@@ -123,12 +125,22 @@ export async function adjudicateEvidence(
     offset += maxCandidatesPerCall, calls += 1
   ) {
     const batch = input.candidates.slice(offset, offset + maxCandidatesPerCall);
-    decisions.push(
-      ...(await input.adjudicator.adjudicate({
-        ...input,
-        candidates: batch,
-      })),
-    );
+    input.onAttempt?.(batch.length);
+    try {
+      decisions.push(
+        ...(await input.adjudicator.adjudicate({
+          ...input,
+          candidates: batch,
+        })),
+      );
+    } catch (error) {
+      if (input.signal?.aborted) throw error;
+      if (!input.onFailure) throw error;
+      // One malformed/slow model batch must not erase the article-derived
+      // report or evidence accepted from earlier batches. Keep the run
+      // progressive and record the degraded adjudication in telemetry.
+      input.onFailure?.(error, batch);
+    }
   }
   return decisions;
 }

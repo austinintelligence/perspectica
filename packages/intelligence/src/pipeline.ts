@@ -217,6 +217,28 @@ export async function* analyzeArticle(input: AnalysisInput): AsyncGenerator<Pipe
       budget,
       signal: input.signal,
       adjudicator: input.adjudicator,
+      onAttempt: () => {
+        telemetry.modelCalls += 1;
+      },
+      onFailure: (error, failedCandidates) => {
+        const missionIds = [
+          ...new Set(
+            failedCandidates.flatMap((candidate) =>
+              candidate.missionId
+                ? [candidate.missionId]
+                : plan.missions.map((mission) => mission.id),
+            ),
+          ),
+        ];
+        ledger.markMissionsFailed(
+          missionIds,
+          pipelineErrorMessage(error, "Evidence adjudication was unavailable."),
+        );
+        noteTelemetry(
+          telemetry,
+          `adjudication.degraded=${pipelineErrorMessage(error, "model batch unavailable")}`,
+        );
+      },
     });
     ledger.acceptAdjudications(decisions);
     yield emit("ledger.updated", {
@@ -269,6 +291,7 @@ export async function* analyzeArticle(input: AnalysisInput): AsyncGenerator<Pipe
         "additional-context",
       ],
       ledger,
+      projected,
     );
     for (const section of failedSections) {
       yield emit("section.failed", {
@@ -310,12 +333,23 @@ export async function* analyzeArticle(input: AnalysisInput): AsyncGenerator<Pipe
 function failedSectionsForReport(
   sections: readonly ReportSection[],
   ledger: EvidenceLedger,
+  projected: ReturnType<typeof projectReport>,
 ): ReportSection[] {
-  return sections.filter((section) =>
-    ledger.plan.missions.some(
+  return sections.filter((section) => {
+    const hasFailedMission = ledger.plan.missions.some(
       (mission) => ledger.isMissionFailed(mission.id) && mission.canServeSections.includes(section),
-    ),
-  );
+    );
+    if (!hasFailedMission) return false;
+    if (ledger.hasEvidenceForSection(section)) return false;
+    // Bias is projected from article-owned language. A failed context mission
+    // cannot invalidate it. Likewise, retain a defensible article-led compass
+    // and let the contextual copy disclose that no outside signal was verified.
+    if (section === "bias") return false;
+    if (section === "compass") {
+      return projected.compass.score === null || projected.compass.evidence.length === 0;
+    }
+    return section !== "works-cited";
+  });
 }
 
 /** Retry only requested report lanes against the existing evidence graph. */
@@ -372,6 +406,28 @@ export async function* retryArticleSections(
       budget: artifacts.budget,
       signal,
       adjudicator: input.adjudicator,
+      onAttempt: () => {
+        artifacts.telemetry.modelCalls += 1;
+      },
+      onFailure: (error, failedCandidates) => {
+        const missionIds = [
+          ...new Set(
+            failedCandidates.flatMap((candidate) =>
+              candidate.missionId
+                ? [candidate.missionId]
+                : artifacts.plan.missions.map((mission) => mission.id),
+            ),
+          ),
+        ];
+        artifacts.ledger.markMissionsFailed(
+          missionIds,
+          pipelineErrorMessage(error, "Evidence adjudication was unavailable."),
+        );
+        noteTelemetry(
+          artifacts.telemetry,
+          `retry.adjudication.degraded=${pipelineErrorMessage(error, "model batch unavailable")}`,
+        );
+      },
     });
     artifacts.ledger.acceptAdjudications(decisions);
     const perspective = synthesizePerspective(artifacts.index, artifacts.plan, artifacts.ledger);
@@ -410,9 +466,11 @@ export async function* retryArticleSections(
     }
     if (input.sections.includes("works-cited"))
       yield emit("worksCited.ready", projected.sourceList);
-    const failedSections = failedSectionsForReport(input.sections, artifacts.ledger).filter(
-      (section) => section !== "works-cited",
-    );
+    const failedSections = failedSectionsForReport(
+      input.sections,
+      artifacts.ledger,
+      projected,
+    ).filter((section) => section !== "works-cited");
     for (const section of failedSections) {
       yield emit("section.failed", {
         section,
