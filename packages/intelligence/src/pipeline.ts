@@ -82,6 +82,11 @@ function isAbortError(error: unknown, signal?: AbortSignal): boolean {
   );
 }
 
+function pipelineErrorMessage(error: unknown, fallback: string): string {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  return (message.trim() || fallback).slice(0, 1_000);
+}
+
 export async function* analyzeArticle(input: AnalysisInput): AsyncGenerator<PipelineEvent> {
   const now = input.now ?? (() => new Date());
   const analysisId = input.analysisId ?? randomId("analysis");
@@ -279,7 +284,7 @@ export async function* analyzeArticle(input: AnalysisInput): AsyncGenerator<Pipe
       yield emit("analysis.cancelled", { message: "Analysis cancelled." });
       return;
     }
-    const message = error instanceof Error ? error.message : "The analysis pipeline failed.";
+    const message = pipelineErrorMessage(error, "The analysis pipeline failed.");
     yield emit("phase.changed", { phase: "failed", message });
     yield emit("analysis.failed", { message, retryable: true });
   }
@@ -414,7 +419,7 @@ export async function* retryArticleSections(
       yield emit("analysis.cancelled", { message: "Retry cancelled." });
       return;
     }
-    const message = error instanceof Error ? error.message : "The targeted retry failed.";
+    const message = pipelineErrorMessage(error, "The targeted retry failed.");
     yield emit("phase.changed", { phase: "failed", message });
     yield emit("analysis.failed", { message, retryable: true });
   }

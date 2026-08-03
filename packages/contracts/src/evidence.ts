@@ -72,13 +72,13 @@ export type EvidenceContextSignal = z.infer<typeof EvidenceContextSignalSchema>;
 export const EvidenceAdjudicationSchema = z.object({
   candidateId: text.max(160),
   missionId: text.max(160),
-  claimId: text.max(160).nullable(),
+  claimId: text.max(160).nullable().default(null),
   relationship: EvidenceRelationshipV2Schema,
   statement: text.max(1_200),
-  excerpt: text.max(4_000).nullable(),
+  excerpt: text.max(4_000).nullable().default(null),
   confidence: z.number().min(0).max(1),
   relevance: z.number().min(0).max(1),
-  context: EvidenceContextSignalSchema.nullable(),
+  context: EvidenceContextSignalSchema.nullable().default(null),
 });
 export type EvidenceAdjudication = z.infer<typeof EvidenceAdjudicationSchema>;
 

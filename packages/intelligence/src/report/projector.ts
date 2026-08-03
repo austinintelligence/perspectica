@@ -65,10 +65,7 @@ export function projectBias(plan: AnalysisPlan): BiasResult {
 
 export function projectSourceList(article: ArticleIndex): SourceListResult {
   const links = article.links
-    .filter((link) =>
-      ["external", "likely-primary", "same-publication"].includes(link.classification),
-    )
-    .filter((link) => link.classification !== "same-publication" || Boolean(link.paragraphId))
+    .filter((link) => ["external", "likely-primary"].includes(link.classification))
     .map((link) => ({
       id: link.id,
       label: link.label,

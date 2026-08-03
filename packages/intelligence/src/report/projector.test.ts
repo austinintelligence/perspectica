@@ -65,6 +65,6 @@ describe("report source projection", () => {
       ],
     } as ArticleIndex);
 
-    expect(result.sources.map((source) => source.id)).toEqual(["external", "primary", "same"]);
+    expect(result.sources.map((source) => source.id)).toEqual(["external", "primary"]);
   });
 });

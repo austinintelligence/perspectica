@@ -24,7 +24,16 @@ const SOCIAL_HOSTS = new Set([
   "twitter.com",
   "x.com",
   "youtube.com",
+  "flipboard.com",
+  "sharethis.com",
+  "addtoany.com",
+  "pinterest.com",
+  "t.me",
+  "telegram.me",
 ]);
+const NON_EDITORIAL_HOSTS = new Set(["beyondwords.io"]);
+const PROMOTIONAL_PATTERN =
+  /\b(?:subscribe|newsletter|advert(?:isement)?|sponsor|shop|store|download|app|onelink|affiliate)\b/i;
 const NAVIGATION_PATH =
   /(?:^|\/)(?:search|tag|topic|category|author|login|account|subscribe)(?:\/|$)/i;
 const COMMON_CAPITALIZED = new Set([
@@ -195,7 +204,7 @@ function linkClassification(
   if ([...SOCIAL_HOSTS].some((domain) => linkHost === domain || linkHost.endsWith(`.${domain}`))) {
     return "social";
   }
-  if (/\b(?:subscribe|newsletter|advert|sponsor|shop|store)\b/i.test(`${link.label} ${link.url}`)) {
+  if (NON_EDITORIAL_HOSTS.has(linkHost) || PROMOTIONAL_PATTERN.test(`${link.label} ${link.url}`)) {
     return "promotional";
   }
   if (

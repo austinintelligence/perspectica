@@ -175,6 +175,28 @@ describe("V2 intelligence pipeline", () => {
     expect(events.at(-1)?.type).toBe("analysis.cancelled");
   });
 
+  it("turns an empty provider error into a valid terminal failure event", async () => {
+    const events = [];
+    const emptyErrorAdjudicator: EvidenceAdjudicator = {
+      async adjudicate() {
+        throw new Error("");
+      },
+    };
+    for await (const event of analyzeArticle({
+      article: article(),
+      retriever: retriever(),
+      adjudicator: emptyErrorAdjudicator,
+      mode: "fast",
+      reasoningEffort: "low",
+    }))
+      events.push(event);
+
+    expect(events.at(-1)?.type).toBe("analysis.failed");
+    const failure = events.at(-1);
+    if (failure?.type === "analysis.failed")
+      expect(failure.data.message).toBe("The analysis pipeline failed.");
+  });
+
   it("retries only requested lanes from the existing artifacts", async () => {
     let artifacts: AnalysisArtifacts | undefined;
     const emptyRetriever = {
