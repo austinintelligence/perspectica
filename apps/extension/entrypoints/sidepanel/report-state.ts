@@ -1,6 +1,6 @@
+import type { PipelineEvent, PipelinePhase } from "@perspectica/contracts/events";
 import type {
   AdditionalContextResult,
-  AnalysisEvent,
   AnalysisMetadata,
   BiasResult,
   CompassResult,
@@ -8,8 +8,20 @@ import type {
   JournalistContextResult,
   SourceListResult,
 } from "@perspectica/contracts";
+import type { AnalysisPlan, ReportSection } from "@perspectica/contracts/report";
 
 export type LoadStatus = "waiting" | "loading" | "ready" | "empty" | "error";
+export type ReportPhase =
+  | "idle"
+  | "index"
+  | "plan"
+  | "retrieval"
+  | "perspective"
+  | "composition"
+  | "complete"
+  | "partial"
+  | "error"
+  | "cancelled";
 
 export interface SectionState<T> {
   status: LoadStatus;
@@ -25,11 +37,33 @@ export interface ArticleMetadata {
   contentType: "news" | "analysis" | "opinion" | "unknown";
 }
 
+export interface IndexedArticleSummary {
+  fingerprint: string;
+  paragraphCount: number;
+  sentenceCount: number;
+  claimSeedCount: number;
+}
+
+export interface ResearchProgress {
+  completedMissions: number;
+  totalMissions: number;
+  acceptedSources: number;
+  acceptedAssertions: number;
+  sufficiency: string;
+}
+
 export interface ReportState {
-  phase: "idle" | "extracting" | "analyzing" | "complete" | "partial" | "error" | "cancelled";
+  phase: ReportPhase;
+  pipelinePhase: PipelinePhase | null;
+  phaseMessage: string | null;
   analysis: AnalysisMetadata | null;
   startedAt: string | null;
   metadata: ArticleMetadata | null;
+  indexed: IndexedArticleSummary | null;
+  plan: AnalysisPlan | null;
+  research: ResearchProgress | null;
+  ledger: { sourceCount: number; assertionCount: number };
+  failedSections: ReportSection[];
   sourceList: SectionState<SourceListResult>;
   compass: SectionState<CompassResult>;
   bias: SectionState<BiasResult>;
@@ -40,18 +74,21 @@ export interface ReportState {
   error: string | null;
 }
 
-const waiting = <T>(): SectionState<T> => ({
-  status: "waiting",
-  data: null,
-  error: null,
-});
+const waiting = <T>(): SectionState<T> => ({ status: "waiting", data: null, error: null });
 
 export function createInitialReportState(): ReportState {
   return {
     phase: "idle",
+    pipelinePhase: null,
+    phaseMessage: null,
     analysis: null,
     startedAt: null,
     metadata: null,
+    indexed: null,
+    plan: null,
+    research: null,
+    ledger: { sourceCount: 0, assertionCount: 0 },
+    failedSections: [],
     sourceList: waiting(),
     compass: waiting(),
     bias: waiting(),
@@ -64,15 +101,65 @@ export function createInitialReportState(): ReportState {
 }
 
 export function beginExtraction(): ReportState {
-  return { ...createInitialReportState(), phase: "extracting" };
+  return { ...createInitialReportState(), phase: "index", phaseMessage: "Reading the article." };
+}
+
+export function beginTargetedRetry(
+  state: ReportState,
+  sections: readonly ReportSection[],
+): ReportState {
+  let next: ReportState = {
+    ...state,
+    phase: "retrieval",
+    pipelinePhase: "retrieving",
+    phaseMessage: "Retrying incomplete research lanes.",
+    failedSections: state.failedSections.filter((section) => !sections.includes(section)),
+    error: null,
+  };
+  for (const section of sections) {
+    switch (section) {
+      case "compass":
+        next = { ...next, compass: loading(next.compass) };
+        break;
+      case "bias":
+        next = { ...next, bias: loading(next.bias) };
+        break;
+      case "journalist-context":
+        next = { ...next, journalistContext: loading(next.journalistContext) };
+        break;
+      case "supporting":
+        next = { ...next, supporting: loading(next.supporting) };
+        break;
+      case "contradicting":
+        next = { ...next, contradicting: loading(next.contradicting) };
+        break;
+      case "additional-context":
+        next = { ...next, additionalContext: loading(next.additionalContext) };
+        break;
+      case "works-cited":
+        next = { ...next, sourceList: loading(next.sourceList) };
+        break;
+    }
+  }
+  return next;
+}
+
+export function isAnalysisActive(phase: ReportPhase): boolean {
+  return ["index", "plan", "retrieval", "perspective", "composition"].includes(phase);
 }
 
 export function failReport(state: ReportState, message: string): ReportState {
-  return { ...state, phase: "error", error: message };
+  return {
+    ...state,
+    phase: "error",
+    pipelinePhase: "failed",
+    phaseMessage: message,
+    error: message,
+  };
 }
 
 export function cancelReport(state: ReportState): ReportState {
-  return { ...state, phase: "cancelled", error: null };
+  return { ...state, phase: "cancelled", pipelinePhase: "cancelled", error: null };
 }
 
 function loaded<T extends { status: "ready" | "empty" }>(data: T): SectionState<T> {
@@ -96,199 +183,156 @@ function failIncompleteSection<T>(
     : failed(section, section.error ?? message);
 }
 
-function sourceUrlKey(value: string): string {
-  try {
-    const url = new URL(value);
-    url.hash = "";
-    for (const key of [...url.searchParams.keys()]) {
-      if (key.startsWith("utm_") || key === "fbclid" || key === "gclid" || key === "ref") {
-        url.searchParams.delete(key);
-      }
-    }
-    url.pathname = url.pathname.replace(/\/+$/, "") || "/";
-    return url.toString().toLocaleLowerCase("en-US");
-  } catch {
-    return value.toLocaleLowerCase("en-US");
+function phaseForPipeline(phase: PipelinePhase): ReportPhase {
+  switch (phase) {
+    case "indexed":
+      return "index";
+    case "planning":
+      return "plan";
+    case "retrieving":
+      return "retrieval";
+    case "adjudicating":
+      return "perspective";
+    case "composing":
+      return "composition";
+    case "complete":
+      return "complete";
+    case "partial":
+      return "partial";
+    case "failed":
+      return "error";
+    case "cancelled":
+      return "cancelled";
   }
 }
 
-function sourceUrls(section: EvidenceSection | AdditionalContextResult | null): Set<string> {
-  return new Set(section?.sources.map((source) => sourceUrlKey(source.url)) ?? []);
-}
-
-function withoutSourceUrls<T extends EvidenceSection | AdditionalContextResult>(
-  section: T,
-  blockedUrls: ReadonlySet<string>,
-  emptySummary: string,
-): T {
-  const sources = section.sources.filter((source) => !blockedUrls.has(sourceUrlKey(source.url)));
-  if (sources.length === section.sources.length) return section;
-  const sourceIds = new Set(sources.map((source) => source.id));
-  const readerCopy = section.readerCopy
-    ? {
-        ...section.readerCopy,
-        findings: section.readerCopy.findings
-          .map((finding) => ({
-            ...finding,
-            citationIds: finding.citationIds.filter((id) => sourceIds.has(id)),
-          }))
-          .filter((finding) => finding.citationIds.length > 0),
-      }
-    : undefined;
-  return {
-    ...section,
-    status: sources.length > 0 ? "ready" : "empty",
-    summary: sources.length > 0 ? section.summary : emptySummary,
-    sources,
-    ...(sources.length > 0 && readerCopy ? { readerCopy } : { readerCopy: undefined }),
-  } as T;
-}
-
-function pruneLoadedSection<T extends EvidenceSection | AdditionalContextResult>(
-  section: SectionState<T>,
-  blockedUrls: ReadonlySet<string>,
-  emptySummary: string,
-): SectionState<T> {
-  return section.data
-    ? loaded(withoutSourceUrls(section.data, blockedUrls, emptySummary))
-    : section;
-}
-
-export function reduceAnalysisEvent(state: ReportState, event: AnalysisEvent): ReportState {
-  if (state.analysis && state.analysis.analysisId !== event.analysisId) {
-    return state;
-  }
+export function reducePipelineEvent(state: ReportState, event: PipelineEvent): ReportState {
+  if (state.analysis && state.analysis.analysisId !== event.analysisId) return state;
 
   switch (event.type) {
     case "analysis.started":
       return {
         ...state,
-        phase: "analyzing",
+        phase: "index",
+        pipelinePhase: null,
+        phaseMessage: "Reading the article.",
         analysis: event.data,
         startedAt: event.data.startedAt,
+        sourceList: loading(state.sourceList),
         compass: loading(state.compass),
         bias: loading(state.bias),
         journalistContext: loading(state.journalistContext),
         supporting: loading(state.supporting),
         contradicting: loading(state.contradicting),
         additionalContext: loading(state.additionalContext),
+        error: null,
+      };
+    case "article.indexed":
+      return {
+        ...state,
+        phase: "index",
+        indexed: {
+          fingerprint: event.data.fingerprint,
+          paragraphCount: event.data.paragraphCount,
+          sentenceCount: event.data.sentenceCount,
+          claimSeedCount: event.data.claimSeedCount,
+        },
+      };
+    case "phase.changed":
+      return {
+        ...state,
+        phase: phaseForPipeline(event.data.phase),
+        pipelinePhase: event.data.phase,
+        phaseMessage: event.data.message,
+        error: event.data.phase === "failed" ? event.data.message : state.error,
       };
     case "metadata.ready":
       return { ...state, metadata: event.data };
     case "sourceList.ready":
+    case "worksCited.ready":
       return { ...state, sourceList: loaded(event.data) };
-    case "compass.provisional":
+    case "lens.ready":
       return {
         ...state,
-        compass: { status: "loading", data: event.data, error: null },
+        plan: event.data.plan,
+        compass: event.data.provisionalCompass
+          ? { status: "loading", data: event.data.provisionalCompass, error: null }
+          : loading(state.compass),
+        bias: loaded(event.data.provisionalBias),
       };
-    case "compass.ready":
-      return { ...state, compass: { status: "ready", data: event.data, error: null } };
-    case "bias.ready":
-      return { ...state, bias: loaded(event.data) };
-    case "journalistContext.ready":
-      return { ...state, journalistContext: loaded(event.data) };
-    case "supporting.ready": {
-      const supporting = withoutSourceUrls(
-        event.data,
-        sourceUrls(state.contradicting.data),
-        "No independently sourced supporting information was verified.",
-      );
+    case "research.progress":
+      return { ...state, research: event.data };
+    case "ledger.updated":
       return {
         ...state,
-        supporting: loaded(supporting),
-        additionalContext: pruneLoadedSection(
-          state.additionalContext,
-          sourceUrls(supporting),
-          "No additional outside context was necessary to interpret the central claims.",
-        ),
+        ledger: { sourceCount: event.data.sourceCount, assertionCount: event.data.assertionCount },
       };
-    }
-    case "contradicting.ready": {
-      const contradictingUrls = sourceUrls(event.data);
+    case "perspective.ready":
       return {
         ...state,
-        contradicting: loaded(event.data),
-        supporting: pruneLoadedSection(
-          state.supporting,
-          contradictingUrls,
-          "No independently sourced supporting information was verified.",
-        ),
-        additionalContext: pruneLoadedSection(
-          state.additionalContext,
-          contradictingUrls,
-          "No additional outside context was necessary to interpret the central claims.",
-        ),
+        compass: event.data.compass
+          ? { status: "ready", data: event.data.compass, error: null }
+          : { status: "empty", data: null, error: null },
+        journalistContext: loaded(event.data.journalistContext),
       };
-    }
-    case "additionalContext.ready": {
-      const blockedUrls = new Set([
-        ...sourceUrls(state.supporting.data),
-        ...sourceUrls(state.contradicting.data),
-      ]);
-      return {
-        ...state,
-        additionalContext: loaded(
-          withoutSourceUrls(
-            event.data,
-            blockedUrls,
-            "No additional outside context was necessary to interpret the central claims.",
-          ),
-        ),
-      };
-    }
-    case "section.failed": {
-      const message = event.data.message;
+    case "section.ready":
       switch (event.data.section) {
-        case "compass":
-          return { ...state, compass: failed(state.compass, message) };
         case "bias":
-          return { ...state, bias: failed(state.bias, message) };
+          return { ...state, bias: loaded(event.data.data) };
         case "journalist-context":
-          return {
-            ...state,
-            journalistContext: failed(state.journalistContext, message),
-          };
+          return { ...state, journalistContext: loaded(event.data.data) };
         case "supporting":
-          return { ...state, supporting: failed(state.supporting, message) };
+          return { ...state, supporting: loaded(event.data.data) };
         case "contradicting":
-          return { ...state, contradicting: failed(state.contradicting, message) };
+          return { ...state, contradicting: loaded(event.data.data) };
         case "additional-context":
-          return {
-            ...state,
-            additionalContext: failed(state.additionalContext, message),
-          };
+          return { ...state, additionalContext: loaded(event.data.data) };
       }
-    }
+      return state;
     case "analysis.completed":
-      return event.data.status === "partial"
-        ? {
-            ...state,
-            phase: "partial",
-            compass: event.data.failedSections.includes("compass")
-              ? failIncompleteSection(state.compass)
-              : state.compass,
-            bias: event.data.failedSections.includes("bias")
-              ? failIncompleteSection(state.bias)
-              : state.bias,
-            journalistContext: event.data.failedSections.includes("journalist-context")
-              ? failIncompleteSection(state.journalistContext)
-              : state.journalistContext,
-            supporting: event.data.failedSections.includes("supporting")
-              ? failIncompleteSection(state.supporting)
-              : state.supporting,
-            contradicting: event.data.failedSections.includes("contradicting")
-              ? failIncompleteSection(state.contradicting)
-              : state.contradicting,
-            additionalContext: event.data.failedSections.includes("additional-context")
-              ? failIncompleteSection(state.additionalContext)
-              : state.additionalContext,
-          }
-        : {
-            ...state,
-            phase: "complete",
-          };
+      return {
+        ...state,
+        phase: event.data.status === "partial" ? "partial" : "complete",
+        pipelinePhase: event.data.status,
+        phaseMessage:
+          event.data.status === "partial"
+            ? "Report complete with limited external evidence."
+            : "Report complete.",
+        failedSections: event.data.failedSections,
+        compass: event.data.failedSections.includes("compass")
+          ? failIncompleteSection(state.compass)
+          : state.compass,
+        bias: event.data.failedSections.includes("bias")
+          ? failIncompleteSection(state.bias)
+          : state.bias,
+        journalistContext: event.data.failedSections.includes("journalist-context")
+          ? failIncompleteSection(state.journalistContext)
+          : state.journalistContext,
+        supporting: event.data.failedSections.includes("supporting")
+          ? failIncompleteSection(state.supporting)
+          : state.supporting,
+        contradicting: event.data.failedSections.includes("contradicting")
+          ? failIncompleteSection(state.contradicting)
+          : state.contradicting,
+        additionalContext: event.data.failedSections.includes("additional-context")
+          ? failIncompleteSection(state.additionalContext)
+          : state.additionalContext,
+      };
+    case "analysis.failed":
+      return {
+        ...state,
+        phase: "error",
+        pipelinePhase: "failed",
+        phaseMessage: event.data.message,
+        error: event.data.message,
+      };
+    case "analysis.cancelled":
+      return {
+        ...state,
+        phase: "cancelled",
+        pipelinePhase: "cancelled",
+        phaseMessage: event.data.message,
+        error: null,
+      };
   }
-
-  return state;
 }

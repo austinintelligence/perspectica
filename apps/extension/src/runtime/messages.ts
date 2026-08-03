@@ -1,8 +1,8 @@
-import {
-  AnalysisEventSchema,
-  AnalysisPreferencesSchema,
-  ArticleDocumentSchema,
-} from "@perspectica/contracts";
+import { AnalysisPreferencesSchema, ArticleDocumentSchema } from "@perspectica/contracts";
+import { AnalysisModeSchema } from "@perspectica/contracts/preferences";
+import { PipelineEventSchema } from "@perspectica/contracts/events";
+import { ReportSectionSchema } from "@perspectica/contracts/report";
+import type { PipelineEvent } from "@perspectica/contracts/events";
 import { z } from "zod";
 import { describeError } from "./redaction";
 
@@ -16,12 +16,13 @@ const sequence = z.number().int().nonnegative();
 // analysis runtime must be reloaded as one unit. A load-unpacked extension can
 // otherwise mix a freshly read side-panel bundle with an older, still-running
 // MV3 service worker or offscreen document.
-export const PERSPECTICA_RUNTIME_PROTOCOL = 5;
+export const PERSPECTICA_RUNTIME_PROTOCOL = 6;
 
 export const SearchProviderSchema = z.enum(["exa", "chatgpt"]);
 export type SearchProviderKind = z.infer<typeof SearchProviderSchema>;
 
 export const ExtensionPreferencesSchema = AnalysisPreferencesSchema.extend({
+  mode: AnalysisModeSchema,
   searchProvider: SearchProviderSchema,
   rememberChatGpt: z.boolean(),
 });
@@ -30,6 +31,7 @@ export type ExtensionPreferences = z.infer<typeof ExtensionPreferencesSchema>;
 export const DEFAULT_EXTENSION_PREFERENCES: ExtensionPreferences = {
   model: "gpt-5.6-luna",
   reasoningEffort: "medium",
+  mode: "balanced",
   searchProvider: "exa",
   rememberChatGpt: true,
 };
@@ -98,7 +100,13 @@ export const AnalysisJobSchema = z.object({
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),
   error: z.string().trim().max(1_000).nullable(),
-  events: z.array(AnalysisEventSchema).max(128),
+  // Event bodies live in the IndexedDB journal. This retained field is a
+  // narrow migration boundary: legacy ring-buffer payloads are discarded and
+  // new V2 jobs always expose an empty compatibility array.
+  events: z
+    .unknown()
+    .default([])
+    .transform(() => [] as PipelineEvent[]),
   // Defaults keep jobs created by older unpacked builds readable while every
   // new run receives an explicit owner and monotonic revision metadata.
   runToken: runToken.nullable().default(null),
@@ -110,7 +118,9 @@ export type AnalysisJob = z.infer<typeof AnalysisJobSchema>;
 export const OffscreenAnalysisRequestSchema = z.object({
   article: ArticleDocumentSchema,
   client: z.object({ extensionVersion: requiredText.max(100) }),
-  preferences: AnalysisPreferencesSchema.optional(),
+  // Legacy resumable requests may omit the mode; the offscreen runtime maps
+  // those records to Balanced at the migration boundary.
+  preferences: AnalysisPreferencesSchema.extend({ mode: AnalysisModeSchema.optional() }).optional(),
 });
 export type OffscreenAnalysisRequest = z.infer<typeof OffscreenAnalysisRequestSchema>;
 
@@ -154,9 +164,20 @@ export const ExtensionRequestSchema = z.discriminatedUnion("type", [
     provider: SearchProviderSchema,
   }),
   baseRequest.extend({ type: z.literal("analysis.start"), forceNew: z.boolean().optional() }),
+  baseRequest.extend({
+    type: z.literal("analysis.retry"),
+    jobId,
+    sections: z.array(ReportSectionSchema).min(1).max(6),
+  }),
   baseRequest.extend({ type: z.literal("analysis.getJob"), jobId }),
+  baseRequest.extend({
+    type: z.literal("analysis.getEventsSince"),
+    jobId,
+    lastSequence: sequence,
+  }),
   baseRequest.extend({ type: z.literal("analysis.getLogs") }),
   baseRequest.extend({ type: z.literal("analysis.clearLogs") }),
+  baseRequest.extend({ type: z.literal("research.cache.clear") }),
   baseRequest.extend({ type: z.literal("analysis.cancel"), jobId }),
 ]);
 export type ExtensionRequest = z.infer<typeof ExtensionRequestSchema>;
@@ -174,7 +195,7 @@ export const InternalRequestSchema = z.discriminatedUnion("type", [
     jobId,
     runToken,
     sequence: sequence.positive(),
-    event: AnalysisEventSchema,
+    event: PipelineEventSchema,
   }),
   baseRequest.extend({
     type: z.literal("internal.analysis.log"),
@@ -219,10 +240,20 @@ export const OffscreenCommandSchema = z.discriminatedUnion("type", [
     runToken,
   }),
   z.object({
+    type: z.literal("offscreen.analysis.retry"),
+    protocol: z.literal(PERSPECTICA_RUNTIME_PROTOCOL),
+    jobId,
+    runToken,
+    initialSequence: sequence.default(0),
+    request: OffscreenAnalysisRequestSchema,
+    searchProvider: SearchProviderSchema,
+    sections: z.array(ReportSectionSchema).min(1).max(6),
+  }),
+  z.object({
     type: z.literal("offscreen.providers.test"),
     protocol: z.literal(PERSPECTICA_RUNTIME_PROTOCOL),
     provider: SearchProviderSchema,
-    preferences: AnalysisPreferencesSchema,
+    preferences: AnalysisPreferencesSchema.extend({ mode: AnalysisModeSchema }),
   }),
 ]);
 export type OffscreenCommand = z.infer<typeof OffscreenCommandSchema>;
@@ -247,7 +278,7 @@ export const RuntimePushSchema = z.discriminatedUnion("type", [
     runToken: runToken.nullable(),
     revision: sequence,
     sequence: sequence.positive(),
-    event: AnalysisEventSchema,
+    event: PipelineEventSchema,
   }),
 ]);
 export type RuntimePush = z.infer<typeof RuntimePushSchema>;

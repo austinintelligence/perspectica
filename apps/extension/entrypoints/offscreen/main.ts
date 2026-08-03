@@ -1,12 +1,13 @@
 import { createChatGPT } from "@opencoredev/loginwithchatgpt-ai";
 import type { ChatGPTTokens, ReasoningEffort } from "@opencoredev/loginwithchatgpt-core";
-import { runAnalysis, type AnalysisDependencies } from "@perspectica/analysis";
 import {
-  AgenticAiSdkResearchProvider,
-  type AgenticResearchDiagnostics,
-  type AgenticResearchTrace,
-} from "@perspectica/analysis/agentic-research";
-import { AiSdkArticleLensProvider } from "@perspectica/analysis/ai-sdk";
+  analyzeArticle,
+  retryArticleSections,
+  type AnalysisArtifacts,
+  type PipelineTelemetry,
+} from "@perspectica/intelligence";
+import { EvidenceLedger } from "@perspectica/intelligence";
+import type { EvidenceRetriever } from "@perspectica/contracts/evidence";
 import {
   ExtensionResponseSchema,
   OffscreenCommandSchema,
@@ -17,12 +18,20 @@ import {
   type InternalRequestInput,
   type SearchProviderKind,
 } from "../../src/runtime/messages";
-import { ExaSearchProvider, type ExaRequestDiagnostics } from "../../src/providers/exa";
-import { NativeChatGptSearchProvider } from "../../src/providers/native-chatgpt-search";
+import { ExaEvidenceRetriever } from "../../src/providers/exa-evidence";
+import { NativeChatGptEvidenceRetriever } from "../../src/providers/chatgpt-evidence";
+import { IndexedDbAnalysisArtifactStore } from "../../src/storage/analysis-artifacts";
+import { EvidenceCache } from "../../src/storage/evidence-cache";
 import { describeError, redactText, serializeRedacted } from "../../src/runtime/redaction";
 
 const activeJobs = new Map<string, { controller: AbortController; runToken: string }>();
+const completedArtifacts = new Map<string, AnalysisArtifacts>();
+const artifactStore = new IndexedDbAnalysisArtifactStore();
 const telemetryTails = new Map<string, Promise<void>>();
+
+function artifactKey(jobId: string, runToken: string): string {
+  return `${jobId}:${runToken}`;
+}
 
 function queueTelemetry(
   jobId: string,
@@ -37,19 +46,11 @@ function queueTelemetry(
     payload: entry.payload ? redactText(entry.payload) : null,
   };
   const previous = telemetryTails.get(jobId) ?? Promise.resolve();
-  const next = previous
+  const next: Promise<void> = previous
     .catch(() => undefined)
-    .then(() =>
-      sendInternal({
-        type: "internal.analysis.log",
-        jobId,
-        entry: sanitized,
-      }),
-    )
+    .then(() => sendInternal({ type: "internal.analysis.log", jobId, entry: sanitized }))
     .then(() => undefined)
     .catch((error: unknown) => {
-      // Telemetry is diagnostic only. A storage/message failure must never
-      // turn an otherwise healthy analysis into a failed run.
       console.warn("[perspectica] telemetry persistence failed", describeError(error));
     });
   telemetryTails.set(jobId, next);
@@ -63,59 +64,6 @@ async function flushTelemetry(jobId: string): Promise<void> {
   await telemetryTails.get(jobId)?.catch(() => undefined);
 }
 
-function logResearchDiagnostics(jobId: string, diagnostics: AgenticResearchDiagnostics): void {
-  const details = [
-    `section=${diagnostics.section}`,
-    `status=${diagnostics.status}`,
-    `durationMs=${diagnostics.durationMs}`,
-    `queries=${diagnostics.queryCount}`,
-    `candidates=${diagnostics.candidateCount}`,
-    `sourceReads=${diagnostics.sourceReads}`,
-    `modelSteps=${diagnostics.modelSteps}`,
-    ...(diagnostics.error ? [`error=${serializeRedacted(diagnostics.error) ?? "[redacted]"}`] : []),
-  ];
-  console.info(`[perspectica] ${details.join(" ")}`);
-  void queueTelemetry(jobId, {
-    level: diagnostics.status === "failed" ? "error" : "info",
-    scope: `research.${diagnostics.section}`,
-    event: `specialist.${diagnostics.status}`,
-    message: `${diagnostics.section} specialist ${diagnostics.status}.`,
-    payload: serializeRedacted(diagnostics),
-  });
-}
-
-function logResearchTrace(jobId: string, trace: AgenticResearchTrace): void {
-  const level = trace.event.endsWith(".failed")
-    ? "error"
-    : trace.event.endsWith(".retrying")
-      ? "warn"
-      : trace.event.includes("queued")
-        ? "debug"
-        : "info";
-  void queueTelemetry(jobId, {
-    level,
-    scope: `research.${trace.section}`,
-    event: trace.event,
-    message: trace.message,
-    payload: serializeRedacted(trace.data),
-  });
-}
-
-function logExaDiagnostics(jobId: string, diagnostics: ExaRequestDiagnostics): void {
-  void queueTelemetry(jobId, {
-    level:
-      diagnostics.outcome === "failed"
-        ? "error"
-        : diagnostics.outcome === "retrying"
-          ? "warn"
-          : "debug",
-    scope: "provider.exa",
-    event: `request.${diagnostics.outcome}`,
-    message: `Exa ${diagnostics.endpoint} attempt ${diagnostics.attempt} ${diagnostics.outcome}.`,
-    payload: serializeRedacted(diagnostics),
-  });
-}
-
 async function sendInternal<T>(request: InternalRequestInput, attempts = 3): Promise<T> {
   let lastError: unknown;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -127,109 +75,85 @@ async function sendInternal<T>(request: InternalRequestInput, attempts = 3): Pro
       return response.data as T;
     } catch (error) {
       lastError = error;
-      if (attempt + 1 < attempts) {
+      if (attempt + 1 < attempts)
         await new Promise((resolve) => setTimeout(resolve, 150 * 2 ** attempt));
-      }
     }
   }
   throw lastError instanceof Error ? lastError : new Error("The extension runtime is unavailable.");
 }
 
-async function createDependencies(
+function logTelemetry(jobId: string, telemetry: PipelineTelemetry): void {
+  void queueTelemetry(jobId, {
+    level: "info",
+    scope: "pipeline",
+    event: "phase.snapshot",
+    message: "V2 pipeline telemetry snapshot.",
+    payload: serializeRedacted({
+      modelCalls: telemetry.modelCalls,
+      searchCalls: telemetry.searchCalls,
+      contentReads: telemetry.contentReads,
+      acceptedSources: telemetry.acceptedSources,
+      rejectedSources: telemetry.rejectedSources,
+      eventBytes: telemetry.eventBytes,
+      cacheHits: telemetry.cacheHits,
+      firstUsefulResultMs: telemetry.firstUsefulResultMs,
+      finalLatencyMs: telemetry.finalLatencyMs,
+      debugRing: telemetry.debugRing.slice(-8),
+    }),
+  });
+}
+
+async function createRetriever(
   jobId: string,
   modelId: string,
   reasoningEffort: ReasoningEffort,
-  searchProviderKind: SearchProviderKind,
-): Promise<AnalysisDependencies> {
+  providerKind: SearchProviderKind,
+): Promise<{ model: ReturnType<ReturnType<typeof createChatGPT>>; retriever: EvidenceRetriever }> {
   const chatgpt = createChatGPT({
     credentials: () => sendInternal<ChatGPTTokens>({ type: "internal.auth.getTokens" }),
     defaultModel: modelId,
     reasoningEffort,
     textVerbosity: "low",
   });
-  const searchProvider =
-    searchProviderKind === "exa"
-      ? new ExaSearchProvider(
-          (
-            await sendInternal<{ apiKey: string }>({
-              type: "internal.providers.getSecret",
-              provider: "exa",
-            })
-          ).apiKey,
-          undefined,
-          (diagnostics) => logExaDiagnostics(jobId, diagnostics),
-        )
-      : new NativeChatGptSearchProvider(chatgpt, modelId);
-  const model = chatgpt(modelId);
-  const articleLensProvider = new AiSdkArticleLensProvider({
-    model,
-    promptVersion: "self-contained-article-lens-v1",
-  });
-  const articleLens: AnalysisDependencies["articleLens"] = {
-    analyze: async (request, signal) => {
-      const startedAt = Date.now();
-      void queueTelemetry(jobId, {
-        level: "info",
-        scope: "article-lens",
-        event: "model.started",
-        message: "Article Lens model call started.",
-        payload: serializeRedacted({
-          title: request.article.title,
-          paragraphCount: request.article.paragraphs.length,
-          model: modelId,
-          reasoningEffort,
-        }),
-      });
-      try {
-        const output = await articleLensProvider.analyze(request, signal);
-        void queueTelemetry(jobId, {
-          level: "info",
-          scope: "article-lens",
-          event: "model.completed",
-          message: "Article Lens produced valid structured output.",
-          payload: serializeRedacted({
-            durationMs: Date.now() - startedAt,
-            compassEvidenceCount: output.compassEvidence.length,
-            biasCandidateCount: output.biasCandidates.length,
-            claimCount: output.dossier?.claims.length ?? 0,
-            researchQuestionCount: output.dossier?.researchQuestions.length ?? 0,
-          }),
-        });
-        return output;
-      } catch (error) {
-        void queueTelemetry(jobId, {
-          level: "error",
-          scope: "article-lens",
-          event: "model.failed",
-          message: "Article Lens failed.",
-          payload: serializeRedacted({
-            durationMs: Date.now() - startedAt,
-            error,
-          }),
-        });
-        throw error;
-      }
-    },
-  };
-  const research = new AgenticAiSdkResearchProvider({
-    model,
-    searchProvider,
-    // Keep every research lane eligible to progress while matching the shared
-    // network gate to both built-in providers' two-request concurrency limit.
-    // A separate model-agent cap prevents independent sections from queueing.
-    maxConcurrentAgents: 6,
-    maxConcurrentSearches: 2,
-    onDiagnostics: (diagnostics) => logResearchDiagnostics(jobId, diagnostics),
-    onTrace: (trace) => logResearchTrace(jobId, trace),
-  });
+  if (providerKind === "exa") {
+    const secret = await sendInternal<{ apiKey: string }>({
+      type: "internal.providers.getSecret",
+      provider: "exa",
+    });
+    return {
+      model: chatgpt(modelId),
+      retriever: new ExaEvidenceRetriever(
+        secret.apiKey,
+        undefined,
+        (diagnostics) => {
+          void queueTelemetry(jobId, {
+            level: diagnostics.outcome === "failed" ? "error" : "debug",
+            scope: "provider.exa",
+            event: `mission.${diagnostics.outcome}`,
+            message: `Exa mission ${diagnostics.missionId} ${diagnostics.outcome}.`,
+            payload: serializeRedacted(diagnostics),
+          });
+        },
+        new EvidenceCache(),
+      ),
+    };
+  }
   return {
-    articleLens,
-    research,
-    mode: "live",
-    pipelineVersion: "self-contained-agentic-2026-07-29.4",
-    promptVersion: articleLensProvider.promptVersion,
-    modelVersion: modelId,
-    reasoningEffort,
+    model: chatgpt(modelId),
+    retriever: new NativeChatGptEvidenceRetriever(
+      chatgpt,
+      modelId,
+      (diagnostics) => {
+        void queueTelemetry(jobId, {
+          level: diagnostics.outcome === "failed" ? "error" : "debug",
+          scope: "provider.chatgpt",
+          event: `global-search.${diagnostics.outcome}`,
+          message: "Native ChatGPT global search completed.",
+          payload: serializeRedacted(diagnostics),
+        });
+      },
+      new EvidenceCache(),
+    ),
   };
 }
 
@@ -245,25 +169,40 @@ async function testSearchProvider(
     reasoningEffort: command.preferences.reasoningEffort,
     textVerbosity: "low",
   });
-  if (command.provider !== "chatgpt") {
-    throw new Error("Only ChatGPT search is tested in the analysis runtime.");
-  }
-  const provider = new NativeChatGptSearchProvider(chatgpt, command.preferences.model);
+  if (command.provider !== "chatgpt")
+    throw new Error("Only ChatGPT web search is tested in the analysis runtime.");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 45_000);
   try {
-    const sources = await provider.search({
-      query: "OpenAI official website",
-      topic: "general",
-      maxResults: 1,
-      excludeDomains: [],
-      includeDomains: ["openai.com"],
-      signal: controller.signal,
-    });
-    if (sources.length === 0) {
+    const retriever = new NativeChatGptEvidenceRetriever(chatgpt, command.preferences.model);
+    const iterator = retriever.retrieve(
+      {
+        missions: [
+          {
+            id: "probe",
+            claimIds: [],
+            purpose: "missing-background",
+            queryVariants: ["OpenAI official website"],
+            priority: 1,
+            estimatedCost: 1,
+            freshness: "timeless",
+            preferredSourceTypes: ["direct-source"],
+            includeDomains: ["openai.com"],
+            excludeDomains: [],
+            canServeSections: ["additional-context"],
+          },
+        ],
+        maxSources: 1,
+        maxConcurrency: 1,
+        deadlineAt: Date.now() + 45_000,
+      },
+      controller.signal,
+    );
+    const first = await iterator[Symbol.asyncIterator]().next();
+    const sourceCount = first.done ? 0 : first.value.cards.length;
+    if (sourceCount === 0)
       throw new Error("ChatGPT completed the request but did not return a web source.");
-    }
-    return { available: true, sourceCount: sources.length };
+    return { available: true, sourceCount };
   } finally {
     clearTimeout(timeout);
   }
@@ -279,100 +218,66 @@ async function runJob(
   activeJobs.get(jobId)?.controller.abort();
   const controller = new AbortController();
   activeJobs.set(jobId, { controller, runToken: command.runToken });
-  let eventSequence = command.initialSequence;
+  let sequence = command.initialSequence;
   const startedAt = Date.now();
-  console.info(
-    `[perspectica] job=${jobId} model=${command.request.preferences?.model ?? "gpt-5.6-luna"} provider=${command.searchProvider} started`,
-  );
   try {
-    void queueTelemetry(jobId, {
-      level: "info",
-      scope: "analysis",
-      event: "job.started",
-      message: "Analysis job started.",
-      payload: serializeRedacted({
-        jobId,
-        runToken: command.runToken,
-        extensionVersion: command.request.client.extensionVersion,
-        model: command.request.preferences?.model ?? "gpt-5.6-luna",
-        reasoningEffort: command.request.preferences?.reasoningEffort ?? "medium",
-        searchProvider: command.searchProvider,
-        article: {
-          title: command.request.article.title,
-          author: command.request.article.author,
-          publication: command.request.article.publication,
-          canonicalUrl: command.request.article.canonicalUrl,
-          contentType: command.request.article.contentType,
-          paragraphCount: command.request.article.paragraphs.length,
-          originalLinkCount: command.request.article.links.length,
-        },
-        online: navigator.onLine,
-      }),
-    });
     const preferences = command.request.preferences ?? {
       model: "gpt-5.6-luna" as const,
       reasoningEffort: "medium" as const,
+      mode: "balanced" as const,
     };
-    const dependencies = await createDependencies(
+    const { model, retriever } = await createRetriever(
       jobId,
       preferences.model,
       preferences.reasoningEffort,
       command.searchProvider,
     );
-    for await (const event of runAnalysis(command.request, dependencies, controller.signal)) {
-      // Deliver the reader-facing event first. Telemetry is serialized on its
-      // own best-effort tail and flushed only at the terminal boundary.
+    for await (const event of analyzeArticle({
+      article: command.request.article,
+      retriever,
+      model,
+      modelVersion: preferences.model,
+      reasoningEffort: preferences.reasoningEffort,
+      mode: preferences.mode,
+      signal: controller.signal,
+      onTelemetry: (telemetry) => logTelemetry(jobId, telemetry),
+      onArtifacts: async (artifacts) => {
+        for (const key of completedArtifacts.keys()) {
+          if (key !== artifactKey(jobId, command.runToken)) completedArtifacts.delete(key);
+        }
+        completedArtifacts.set(artifactKey(jobId, command.runToken), artifacts);
+        await artifactStore.set(jobId, command.runToken, artifacts);
+      },
+    })) {
       void queueTelemetry(jobId, {
         timestamp: event.emittedAt,
-        level: event.type === "section.failed" ? "error" : "info",
-        scope: "analysis.events",
+        level: event.type === "analysis.failed" ? "error" : "info",
+        scope: "pipeline.events",
         event: event.type,
-        message:
-          event.type === "section.failed"
-            ? `${event.data.section} emitted a failure event.`
-            : `${event.type} emitted.`,
+        message: `${event.type} emitted.`,
         payload: serializeRedacted(event.data),
       });
       await sendInternal({
         type: "internal.analysis.event",
         jobId,
         runToken: command.runToken,
-        sequence: ++eventSequence,
+        sequence: ++sequence,
         event,
       });
     }
-    void queueTelemetry(jobId, {
-      level: "info",
-      scope: "analysis",
-      event: "job.completed",
-      message: "Analysis generator completed.",
-      payload: serializeRedacted({ durationMs: Date.now() - startedAt }),
-    });
     await flushTelemetry(jobId);
     await sendInternal({
       type: "internal.analysis.finished",
       jobId,
       runToken: command.runToken,
-      sequence: ++eventSequence,
+      sequence: ++sequence,
     });
-    console.info(`[perspectica] job=${jobId} completed durationMs=${Date.now() - startedAt}`);
-  } catch (error) {
-    console.error(
-      `[perspectica] job=${jobId} failed durationMs=${Date.now() - startedAt}`,
-      describeError(error),
+    console.info(
+      `[perspectica] job=${jobId} V2 pipeline completed durationMs=${Date.now() - startedAt}`,
     );
+  } catch (error) {
     if (!controller.signal.aborted) {
-      void queueTelemetry(jobId, {
-        level: "error",
-        scope: "analysis",
-        event: "job.failed",
-        message: "Analysis runtime stopped unexpectedly.",
-        payload: serializeRedacted({
-          durationMs: Date.now() - startedAt,
-          online: navigator.onLine,
-          error,
-        }),
-      });
+      console.error(`[perspectica] job=${jobId} failed`, describeError(error));
       await flushTelemetry(jobId);
       try {
         await sendInternal(
@@ -380,7 +285,7 @@ async function runJob(
             type: "internal.analysis.failed",
             jobId,
             runToken: command.runToken,
-            sequence: ++eventSequence,
+            sequence: ++sequence,
             error: publicError(error, "The analysis runtime stopped unexpectedly."),
           },
           5,
@@ -391,15 +296,106 @@ async function runJob(
           describeError(deliveryError),
         );
       }
-    } else {
+    }
+  } finally {
+    if (activeJobs.get(jobId)?.controller === controller) activeJobs.delete(jobId);
+  }
+}
+
+async function runRetryJob(
+  jobId: string,
+  command: Extract<
+    ReturnType<typeof OffscreenCommandSchema.parse>,
+    { type: "offscreen.analysis.retry" }
+  >,
+): Promise<void> {
+  activeJobs.get(jobId)?.controller.abort();
+  const controller = new AbortController();
+  activeJobs.set(jobId, { controller, runToken: command.runToken });
+  let sequence = command.initialSequence;
+  let artifacts = completedArtifacts.get(artifactKey(jobId, command.runToken));
+  try {
+    if (!artifacts) {
+      const persisted = await artifactStore.get(jobId, command.runToken);
+      if (persisted) {
+        artifacts = {
+          ...persisted,
+          ledger: EvidenceLedger.fromSnapshot(
+            persisted.index,
+            persisted.plan,
+            persisted.budget,
+            persisted.ledger,
+          ),
+        };
+        completedArtifacts.set(artifactKey(jobId, command.runToken), artifacts);
+      }
+    }
+    if (!artifacts) {
+      throw new Error(
+        "The bounded retry context is unavailable after the analysis runtime restarted.",
+      );
+    }
+    const preferences = command.request.preferences ?? {
+      model: "gpt-5.6-luna" as const,
+      reasoningEffort: "medium" as const,
+      mode: "balanced" as const,
+    };
+    const { retriever } = await createRetriever(
+      jobId,
+      preferences.model,
+      preferences.reasoningEffort,
+      command.searchProvider,
+    );
+    for await (const event of retryArticleSections({
+      artifacts,
+      retriever,
+      sections: command.sections,
+      signal: controller.signal,
+      onTelemetry: (telemetry) => logTelemetry(jobId, telemetry),
+    })) {
       void queueTelemetry(jobId, {
-        level: "warn",
-        scope: "analysis",
-        event: "job.cancelled",
-        message: "Analysis job was cancelled.",
-        payload: serializeRedacted({ durationMs: Date.now() - startedAt }),
+        timestamp: event.emittedAt,
+        level: event.type === "analysis.failed" ? "error" : "info",
+        scope: "pipeline.events",
+        event: event.type,
+        message: `${event.type} emitted.`,
+        payload: serializeRedacted(event.data),
       });
+      await sendInternal({
+        type: "internal.analysis.event",
+        jobId,
+        runToken: command.runToken,
+        sequence: ++sequence,
+        event,
+      });
+    }
+    await flushTelemetry(jobId);
+    await sendInternal({
+      type: "internal.analysis.finished",
+      jobId,
+      runToken: command.runToken,
+      sequence: ++sequence,
+    });
+  } catch (error) {
+    if (!controller.signal.aborted) {
       await flushTelemetry(jobId);
+      try {
+        await sendInternal(
+          {
+            type: "internal.analysis.failed",
+            jobId,
+            runToken: command.runToken,
+            sequence: ++sequence,
+            error: publicError(error, "The bounded section retry failed."),
+          },
+          5,
+        );
+      } catch (deliveryError) {
+        console.error(
+          "[perspectica] could not deliver targeted retry failure",
+          describeError(deliveryError),
+        );
+      }
     }
   } finally {
     if (activeJobs.get(jobId)?.controller === controller) activeJobs.delete(jobId);
@@ -435,11 +431,13 @@ chrome.runtime.onMessage.addListener((raw, sender, sendResponse) => {
     sendResponse({ accepted, cancelled: accepted });
     return false;
   }
+  if (command.data.type === "offscreen.analysis.retry") {
+    void runRetryJob(command.data.jobId, command.data);
+    sendResponse({ accepted: true });
+    return false;
+  }
   const active = activeJobs.get(command.data.jobId);
   if (active?.runToken === command.data.runToken && !active.controller.signal.aborted) {
-    // Background service workers may be recreated many times during one long
-    // analysis. A matching resume command is an idempotent ownership check,
-    // not a request to abort and restart healthy model work.
     sendResponse({ accepted: true, alreadyRunning: true });
     return false;
   }

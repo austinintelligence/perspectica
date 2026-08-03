@@ -1,16 +1,24 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { m, useReducedMotion } from "motion/react";
 import type { AnalysisModel, AnalysisPreferences } from "@perspectica/contracts";
+import type { AnalysisMode } from "@perspectica/contracts/preferences";
 import type { SearchProviderKind } from "../../src/runtime/messages";
 import { BrandHeader } from "./BrandHeader";
 import { ChevronDownIcon } from "./Icons";
 import { ANALYSIS_MODELS, REASONING_EFFORTS } from "./preferences";
-import { clearExaApiKey, saveExaApiKey, testExaApiKey, testSearchProvider } from "./api";
+import {
+  clearExaApiKey,
+  clearResearchCache,
+  saveExaApiKey,
+  testExaApiKey,
+  testSearchProvider,
+} from "./api";
+
+export type SettingsPreferences = AnalysisPreferences & { mode: AnalysisMode };
 
 interface SettingsScreenProps {
   authenticated: boolean;
-  preferences: AnalysisPreferences;
-  onChange: (preferences: AnalysisPreferences) => void;
+  preferences: SettingsPreferences;
+  onChange: (preferences: SettingsPreferences) => void;
   onClose: () => void;
   onDisconnect: () => Promise<void>;
   availableModels?: string[];
@@ -37,7 +45,7 @@ export function SettingsScreen({
   const [disconnecting, setDisconnecting] = useState(false);
   const [exaKey, setExaKey] = useState("");
   const [providerStatus, setProviderStatus] = useState<string | null>(null);
-  const reduceMotion = useReducedMotion();
+  const [cacheStatus, setCacheStatus] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const onCloseRef = useRef(onClose);
   const titleId = useId();
@@ -109,17 +117,13 @@ export function SettingsScreen({
   };
 
   return (
-    <m.div
+    <div
       ref={dialogRef}
       className="settings-layer atmosphere-page"
       role="dialog"
       aria-modal="true"
       aria-labelledby={titleId}
       tabIndex={-1}
-      initial={reduceMotion ? false : { opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={reduceMotion ? undefined : { opacity: 0, y: 8 }}
-      transition={{ duration: reduceMotion ? 0 : 0.2, ease: "easeOut" }}
     >
       <BrandHeader action="close" actionLabel="Close settings" onAction={onClose} />
       <main className="settings-main">
@@ -128,6 +132,58 @@ export function SettingsScreen({
           <h1 id={titleId}>Settings</h1>
           <p>Choose how Perspectica analyzes articles.</p>
         </header>
+
+        <section className="preference-section">
+          <span className="preference-label" id="analysis-mode-label">
+            Analysis depth
+          </span>
+          <div className="reasoning-control" role="group" aria-labelledby="analysis-mode-label">
+            {(
+              [
+                ["fast", "Fast"],
+                ["balanced", "Balanced"],
+                ["deep", "Deep"],
+              ] as const
+            ).map(([mode, label]) => (
+              <button
+                type="button"
+                aria-pressed={preferences.mode === mode}
+                className={preferences.mode === mode ? "selected" : undefined}
+                onClick={() => onChange({ ...preferences, mode })}
+                key={mode}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <p className="preference-help">
+            {preferences.mode === "fast"
+              ? "Fast uses the smallest context and mission budget."
+              : preferences.mode === "deep"
+                ? "Deep allows more context and evidence checks."
+                : "Balanced is the default tradeoff between speed and depth."}
+          </p>
+        </section>
+
+        <section className="preference-section">
+          <span className="preference-label">Public research cache</span>
+          <p className="preference-help">
+            Cached public evidence never contains ChatGPT credentials or your article identity.
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              setCacheStatus("Clearing cache…");
+              void clearResearchCache().then(
+                () => setCacheStatus("Research cache cleared"),
+                () => setCacheStatus("Could not clear research cache"),
+              );
+            }}
+          >
+            Clear research cache
+          </button>
+          {cacheStatus ? <small className="preference-help">{cacheStatus}</small> : null}
+        </section>
 
         <section className="preference-section">
           <label className="preference-label" htmlFor="analysis-model">
@@ -308,6 +364,6 @@ export function SettingsScreen({
 
         <p className="settings-saved">Changes are saved automatically.</p>
       </main>
-    </m.div>
+    </div>
   );
 }

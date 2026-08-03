@@ -41,6 +41,7 @@ describe("extension runtime protocol", () => {
         preferences: {
           model: "gpt-5.6-luna",
           reasoningEffort: "medium",
+          mode: "balanced",
         },
       }).success,
     ).toBe(true);
