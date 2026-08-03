@@ -1,4 +1,4 @@
-import { AnalysisEventSchema, type AnalysisEvent } from "@perspectica/contracts";
+import { PipelineEventSchema, type PipelineEvent } from "@perspectica/contracts/events";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { JsonStorageArea } from "../storage/areas";
 import { JobStore } from "../storage/job-store";
@@ -103,9 +103,9 @@ function job(status: AnalysisJob["status"], overrides: Partial<AnalysisJob> = {}
   };
 }
 
-function metadataEvent(index: number, analysisId = "analysis-1"): AnalysisEvent {
+function metadataEvent(index: number, analysisId = "analysis-1"): PipelineEvent {
   const emittedAt = new Date(Date.parse("2026-07-29T12:00:00.000Z") + index * 1_000).toISOString();
-  return AnalysisEventSchema.parse({
+  return PipelineEventSchema.parse({
     type: "metadata.ready",
     analysisId,
     emittedAt,
@@ -119,8 +119,8 @@ function metadataEvent(index: number, analysisId = "analysis-1"): AnalysisEvent 
   });
 }
 
-function completedEvent(status: "complete" | "partial" = "complete"): AnalysisEvent {
-  return AnalysisEventSchema.parse({
+function completedEvent(status: "complete" | "partial" = "complete"): PipelineEvent {
+  return PipelineEventSchema.parse({
     type: "analysis.completed",
     analysisId: "analysis-1",
     emittedAt: "2026-07-29T12:01:00.000Z",
@@ -129,6 +129,8 @@ function completedEvent(status: "complete" | "partial" = "complete"): AnalysisEv
       durationMs: 60_000,
       status,
       failedSections: status === "partial" ? ["bias"] : [],
+      acceptedSources: status === "partial" ? 1 : 2,
+      acceptedAssertions: status === "partial" ? 1 : 2,
     },
   });
 }
@@ -265,7 +267,22 @@ describe("BackgroundController runtime protocol", () => {
       status: "complete",
       revision: 2,
       lastEventSequence: 2,
-      events: [base.event, completed.event],
+      events: [],
+    });
+    await expect(
+      dispatch(
+        controller,
+        { type: "analysis.getEventsSince", requestId: "events-1", jobId: "job-1", lastSequence: 0 },
+        sender("sidepanel.html"),
+      ),
+    ).resolves.toMatchObject({
+      ok: true,
+      data: {
+        events: [
+          expect.objectContaining({ sequence: 1, event: base.event }),
+          expect.objectContaining({ sequence: 2, event: completed.event }),
+        ],
+      },
     });
     expect(context.sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({ type: "analysis.eventDelta", sequence: 1 }),
@@ -275,7 +292,7 @@ describe("BackgroundController runtime protocol", () => {
     );
   });
 
-  it("keeps a bounded event ring and does not resume terminal jobs", async () => {
+  it("keeps the event journal out of the job snapshot and does not resume terminal jobs", async () => {
     const context = installChrome();
     const controller = new BackgroundController();
     const initial = job("analyzing");
@@ -297,9 +314,28 @@ describe("BackgroundController runtime protocol", () => {
       expect(response).toMatchObject({ ok: true, data: { accepted: true } });
     }
     const persisted = await jobs.get(initial.id);
-    expect(persisted?.events).toHaveLength(128);
+    expect(persisted?.events).toHaveLength(0);
     expect(persisted?.lastEventSequence).toBe(130);
-    expect(persisted?.events[0]).toEqual(metadataEvent(3));
+    await expect(
+      dispatch(
+        controller,
+        {
+          type: "analysis.getEventsSince",
+          requestId: "events-2",
+          jobId: initial.id,
+          lastSequence: 128,
+        },
+        sender("sidepanel.html"),
+      ),
+    ).resolves.toMatchObject({
+      ok: true,
+      data: {
+        events: expect.arrayContaining([
+          expect.objectContaining({ sequence: 129 }),
+          expect.objectContaining({ sequence: 130 }),
+        ]),
+      },
+    });
 
     context.sendMessage.mockClear();
     await controller.resumeActiveJob();

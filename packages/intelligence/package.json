@@ -1,0 +1,25 @@
+{
+  "name": "@perspectica/intelligence",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./pipeline": "./src/pipeline.ts",
+    "./planning": "./src/planning/lens.ts",
+    "./evidence": "./src/evidence/source-ledger.ts",
+    "./report": "./src/report/projector.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@perspectica/contracts": "workspace:*",
+    "@perspectica/extraction": "workspace:*",
+    "ai": "^7.0.40",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0"
+  }
+}

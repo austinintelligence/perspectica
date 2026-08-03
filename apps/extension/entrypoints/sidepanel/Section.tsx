@@ -1,5 +1,4 @@
 import type { ReactNode } from "react";
-import { AnimatePresence, m, useReducedMotion } from "motion/react";
 import type { LoadStatus } from "./report-state";
 
 interface SectionProps {
@@ -16,12 +15,6 @@ export function shouldRenderSection(status: LoadStatus): boolean {
 
 export function Section({ id, title, status, error, children }: SectionProps) {
   const headingId = `${id}-heading`;
-  const reduceMotion = useReducedMotion();
-  const transition = {
-    duration: reduceMotion ? 0 : 0.16,
-    ease: "easeOut" as const,
-  };
-
   if (!shouldRenderSection(status)) return null;
 
   return (
@@ -29,45 +22,20 @@ export function Section({ id, title, status, error, children }: SectionProps) {
       <h2 className="section-kicker" id={headingId}>
         {title}
       </h2>
-      <AnimatePresence initial={false} mode="wait">
-        {status === "waiting" || status === "loading" ? (
-          <m.div
-            className="section-loading"
-            key="loading"
-            initial={reduceMotion ? false : { opacity: 0, y: 3 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -2 }}
-            transition={transition}
-          >
-            <span aria-hidden="true" />
-            <span aria-hidden="true" />
-            <span aria-hidden="true" />
-            <span className="sr-only">Loading {title}</span>
-          </m.div>
-        ) : status === "error" ? (
-          <m.p
-            className="section-error"
-            role="alert"
-            key="error"
-            initial={reduceMotion ? false : { opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0 }}
-            transition={transition}
-          >
-            {error ?? "This section could not be completed."}
-          </m.p>
-        ) : (
-          <m.div
-            className="section-content"
-            key="content"
-            initial={reduceMotion ? false : { opacity: 0, y: 5 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={transition}
-          >
-            {children}
-          </m.div>
-        )}
-      </AnimatePresence>
+      {status === "waiting" || status === "loading" ? (
+        <div className="section-loading" aria-live="polite">
+          <span aria-hidden="true" />
+          <span aria-hidden="true" />
+          <span aria-hidden="true" />
+          <span className="sr-only">Loading {title}</span>
+        </div>
+      ) : status === "error" ? (
+        <p className="section-error" role="alert">
+          {error ?? "This section could not be completed."}
+        </p>
+      ) : (
+        <div className="section-content">{children}</div>
+      )}
     </section>
   );
 }

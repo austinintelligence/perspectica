@@ -23,6 +23,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "check:extension-package": "node scripts/check-extension-package.mjs",
+    "bench:v2": "node scripts/benchmark-v2.mjs",
     "package:extension": "pnpm --filter @perspectica/extension zip",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",

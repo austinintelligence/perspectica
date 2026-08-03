@@ -4,7 +4,15 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./article": "./src/article.ts",
+    "./evidence": "./src/evidence.ts",
+    "./events": "./src/events.ts",
+    "./limits": "./src/limits.ts",
+    "./preferences": "./src/preferences.ts",
+    "./protocol": "./src/protocol.ts",
+    "./report": "./src/report.ts",
+    "./url": "./src/url.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json"

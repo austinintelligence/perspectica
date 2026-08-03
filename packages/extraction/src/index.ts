@@ -11,6 +11,10 @@ import {
   ArticleDocumentSchema,
   normalizeCanonicalUrl,
 } from "@perspectica/contracts";
+import { buildArticleIndex } from "./article-index";
+
+export { buildArticleIndex } from "./article-index";
+export type { ArticleIndex } from "@perspectica/contracts/article";
 
 export const EXTRACTOR_VERSION = "dom-v5";
 
@@ -300,9 +304,14 @@ function detectContentType(document: Document, canonicalUrl: string): ContentTyp
   return "news";
 }
 
-function extractParagraphs(root: Element): { paragraphs: ArticleParagraph[]; truncated: boolean } {
+function extractParagraphs(root: Element): {
+  paragraphs: ArticleParagraph[];
+  truncated: boolean;
+  paragraphElements: Map<Element, string>;
+} {
   const elements = [...root.querySelectorAll("h2, h3, p, blockquote")];
   const paragraphs: ArticleParagraph[] = [];
+  const paragraphElements = new Map<Element, string>();
   let contentChars = 0;
   let truncated = false;
 
@@ -332,8 +341,9 @@ function extractParagraphs(root: Element): { paragraphs: ArticleParagraph[]; tru
       truncated = true;
     }
 
+    const id = `paragraph-${paragraphs.length + 1}`;
     paragraphs.push({
-      id: `paragraph-${paragraphs.length + 1}`,
+      id,
       index: paragraphs.length,
       kind,
       text,
@@ -344,28 +354,30 @@ function extractParagraphs(root: Element): { paragraphs: ArticleParagraph[]; tru
             null
           : null,
     });
+    // Keep the DOM identity captured at traversal time. Comparing extracted
+    // text later is lossy when paragraphs are truncated or duplicated.
+    paragraphElements.set(element, id);
     contentChars += text.length;
     if (contentChars >= ARTICLE_MAX_CONTENT_CHARS) break;
   }
 
-  return { paragraphs, truncated };
+  return { paragraphs, truncated, paragraphElements };
 }
 
 function findParagraphId(
   element: Element,
   root: Element,
-  paragraphs: ArticleParagraph[],
+  paragraphElements: ReadonlyMap<Element, string>,
 ): string | null {
   const containing = element.closest("p, blockquote, h2, h3");
   if (!containing || !root.contains(containing)) return null;
-  const text = cleanText(containing.textContent);
-  return paragraphs.find((paragraph) => paragraph.text === text)?.id ?? null;
+  return paragraphElements.get(containing) ?? null;
 }
 
 function extractLinks(
   root: Element,
   canonicalUrl: string,
-  paragraphs: ArticleParagraph[],
+  paragraphElements: ReadonlyMap<Element, string>,
 ): ArticleLink[] {
   const seen = new Set<string>();
   const links: ArticleLink[] = [];
@@ -386,7 +398,7 @@ function extractLinks(
       id: `source-${links.length + 1}`,
       label,
       url: normalized,
-      paragraphId: findParagraphId(anchor, root, paragraphs),
+      paragraphId: findParagraphId(anchor, root, paragraphElements),
     });
   }
 
@@ -453,7 +465,7 @@ export function extractArticleDocument(document: Document, fallbackUrl: string):
     language: cleanText(document.documentElement.lang) || null,
     contentType: detectContentType(document, canonicalUrl),
     paragraphs: extracted.paragraphs,
-    links: extractLinks(root.element, canonicalUrl, extracted.paragraphs),
+    links: extractLinks(root.element, canonicalUrl, extracted.paragraphElements),
     extraction: {
       extractorVersion: EXTRACTOR_VERSION,
       extractedAt: new Date().toISOString(),
@@ -467,4 +479,13 @@ export function extractArticleDocument(document: Document, fallbackUrl: string):
       rejectionReason: null,
     },
   });
+}
+
+/**
+ * One extraction pass can hand the intelligence runtime its immutable index.
+ * The legacy document export remains available for narrow wire compatibility
+ * and older integrations, but production V2 callers should use this entry.
+ */
+export function extractArticleIndex(document: Document, fallbackUrl: string) {
+  return buildArticleIndex(extractArticleDocument(document, fallbackUrl));
 }

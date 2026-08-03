@@ -17,6 +17,13 @@ export async function sendRuntimeRequest<T>(request: ExtensionRequestInput): Pro
 }
 
 export function subscribeRuntimePush(listener: (message: RuntimePush) => void): () => void {
+  return subscribeRuntimePushWithStatus(listener);
+}
+
+export function subscribeRuntimePushWithStatus(
+  listener: (message: RuntimePush) => void,
+  onStatus?: (status: "connected" | "reconnecting") => void,
+): () => void {
   const onMessage = (message: unknown) => {
     const parsed = RuntimePushSchema.safeParse(message);
     if (parsed.success) listener(parsed.data);
@@ -26,14 +33,34 @@ export function subscribeRuntimePush(listener: (message: RuntimePush) => void): 
   // recreated. Broadcast messages remain as a compatibility fallback for
   // older unpacked builds and for auth updates.
   let port: chrome.runtime.Port | null = null;
-  try {
-    port = chrome.runtime.connect({ name: RUNTIME_PORT_NAME });
-    port.onMessage.addListener(onMessage);
-  } catch {
-    // Snapshot polling remains available when Chrome is briefly recreating
-    // the MV3 service worker and cannot establish a long-lived port.
-  }
+  let closed = false;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let backoffMs = 250;
+  const connect = () => {
+    if (closed) return;
+    try {
+      port = chrome.runtime.connect({ name: RUNTIME_PORT_NAME });
+      port.onMessage.addListener(onMessage);
+      port.onDisconnect.addListener(() => {
+        port?.onMessage.removeListener(onMessage);
+        port = null;
+        if (closed) return;
+        onStatus?.("reconnecting");
+        reconnectTimer = setTimeout(connect, backoffMs);
+        backoffMs = Math.min(4_000, backoffMs * 2);
+      });
+      backoffMs = 250;
+      onStatus?.("connected");
+    } catch {
+      onStatus?.("reconnecting");
+      reconnectTimer = setTimeout(connect, backoffMs);
+      backoffMs = Math.min(4_000, backoffMs * 2);
+    }
+  };
+  connect();
   const unsubscribe = () => {
+    closed = true;
+    if (reconnectTimer !== null) clearTimeout(reconnectTimer);
     chrome.runtime.onMessage.removeListener(onMessage);
     port?.onMessage.removeListener(onMessage);
     try {

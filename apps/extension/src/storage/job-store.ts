@@ -8,7 +8,9 @@ import {
   type AnalysisLogInput,
   type AnalysisResumeData,
 } from "../runtime/messages";
+import type { AnalysisEnvelope } from "@perspectica/contracts/events";
 import type { JsonStorageArea } from "./areas";
+import { AnalysisJournal } from "./job-journal";
 
 const ACTIVE_JOB_KEY = "perspectica.jobs.active.v1";
 const JOB_PREFIX = "perspectica.jobs.v1.";
@@ -20,7 +22,10 @@ export class JobStore {
   private readonly logTails = new Map<string, Promise<void>>();
   private mutationTail: Promise<void> = Promise.resolve();
 
-  constructor(private readonly storage: JsonStorageArea) {}
+  constructor(
+    private readonly storage: JsonStorageArea,
+    private readonly journal = new AnalysisJournal(),
+  ) {}
 
   async get(id: string): Promise<AnalysisJob | undefined> {
     const parsed = AnalysisJobSchema.safeParse(await this.storage.get(`${JOB_PREFIX}${id}`));
@@ -57,9 +62,9 @@ export class JobStore {
     if (previousId && previousId !== parsed.id) {
       await Promise.all([
         this.storage.remove(`${JOB_PREFIX}${previousId}`),
-        this.storage.remove(`${LOG_PREFIX}${previousId}`),
         this.storage.remove(`${RESUME_PREFIX}${previousId}`),
       ]);
+      await Promise.all([this.journal.clearEvents(previousId), this.journal.clearLogs(previousId)]);
     }
   }
 
@@ -107,10 +112,7 @@ export class JobStore {
       .then(async () => {
         const existing = await this.getLogs(id);
         const sequence = (existing.at(-1)?.sequence ?? 0) + 1;
-        const updated = [...existing, AnalysisLogEntrySchema.parse({ ...entry, sequence })].slice(
-          -MAX_LOG_ENTRIES,
-        );
-        await this.storage.set(`${LOG_PREFIX}${id}`, updated);
+        await this.journal.appendLog(id, AnalysisLogEntrySchema.parse({ ...entry, sequence }));
       });
     this.logTails.set(id, next);
     try {
@@ -121,12 +123,27 @@ export class JobStore {
   }
 
   async getLogs(id: string): Promise<AnalysisLogEntry[]> {
+    const journalLogs = await this.journal.getLogs(id);
+    if (journalLogs.length > 0) return journalLogs;
     const value = await this.storage.get(`${LOG_PREFIX}${id}`);
     const parsed = AnalysisLogEntrySchema.array().max(MAX_LOG_ENTRIES).safeParse(value);
     return parsed.success ? parsed.data : [];
   }
 
   async clearLogs(id: string): Promise<void> {
+    await this.journal.clearLogs(id);
     await this.storage.remove(`${LOG_PREFIX}${id}`);
+  }
+
+  async appendEvent(envelope: AnalysisEnvelope): Promise<void> {
+    await this.journal.appendEvent(envelope);
+  }
+
+  async getEventsSince(id: string, sequence: number): Promise<AnalysisEnvelope[]> {
+    return this.journal.eventsSince(id, sequence);
+  }
+
+  async clearEvents(id: string): Promise<void> {
+    await this.journal.clearEvents(id);
   }
 }

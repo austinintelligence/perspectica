@@ -1,5 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { AnimatePresence, m, useReducedMotion } from "motion/react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
 import type {
   AdditionalContextResult,
   AnalysisPreferences,
@@ -10,6 +16,7 @@ import type {
   ReaderCitation,
   SourceListResult,
 } from "@perspectica/contracts";
+import type { ReportSection } from "@perspectica/contracts/report";
 import { AnalysisProgress } from "./AnalysisProgress";
 import { ArticleAccessScreen } from "./ArticleAccessScreen";
 import { BrandHeader } from "./BrandHeader";
@@ -19,16 +26,17 @@ import { TargetIcon } from "./Icons";
 import { ProgressiveText } from "./ProgressiveText";
 import { Section } from "./Section";
 import { SettingsScreen } from "./SettingsScreen";
+import type { SettingsPreferences } from "./SettingsScreen";
 import { SearchSetupScreen } from "./SearchSetupScreen";
 import { DEFAULT_ANALYSIS_PREFERENCES } from "./preferences";
 import {
   beginExtraction,
+  beginTargetedRetry,
   cancelReport,
-  createInitialReportState,
   failReport,
-  reduceAnalysisEvent,
-  type ReportState,
+  isAnalysisActive,
 } from "./report-state";
+import { ReportStore } from "./report-store";
 import {
   extensionMode,
   clearAnalysisLogs,
@@ -336,7 +344,7 @@ export function PartialReportNotice({ onRetry }: { onRetry: () => void }) {
         incomplete sections are clearly marked.
       </p>
       <button type="button" onClick={onRetry}>
-        Retry the full report
+        Retry incomplete sections
       </button>
     </div>
   );
@@ -352,7 +360,14 @@ export function ProvisionalCompassWarning() {
 }
 
 function AnalysisReport({ preferences, onOpenSettings }: AnalysisReportProps) {
-  const [state, setState] = useState<ReportState>(createInitialReportState);
+  const reportStoreRef = useRef<ReportStore | null>(null);
+  reportStoreRef.current ??= new ReportStore();
+  const reportStore = reportStoreRef.current;
+  const state = useSyncExternalStore(
+    reportStore.subscribe,
+    reportStore.getSnapshot,
+    reportStore.getSnapshot,
+  );
   const [streamStatus, setStreamStatus] = useState<AnalysisStreamStatus>("connected");
   const [logCopyStatus, setLogCopyStatus] = useState<"idle" | "copying" | "copied" | "error">(
     "idle",
@@ -373,43 +388,57 @@ function AnalysisReport({ preferences, onOpenSettings }: AnalysisReportProps) {
     preferencesRef.current = preferences;
   }, [preferences]);
 
-  const analyze = useCallback(async (forceNew = false) => {
-    const runId = ++runRef.current;
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setState(beginExtraction());
-    setStreamStatus("connected");
-
-    try {
-      await streamAnalysis(
-        (event) => {
-          if (runRef.current !== runId) return;
-          setState((current) => reduceAnalysisEvent(current, event));
-        },
-        controller.signal,
-        preferencesRef.current,
-        setStreamStatus,
-        { forceNew },
-      );
-    } catch (error) {
-      if (controller.signal.aborted) return;
-      if (runRef.current === runId) {
-        setState((current) =>
-          failReport(
-            current,
-            error instanceof Error ? error.message : "The article could not be analyzed.",
-          ),
-        );
+  const analyze = useCallback(
+    async (forceNew = false, retrySections?: readonly ReportSection[]) => {
+      const runId = ++runRef.current;
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+      if (retrySections?.length) {
+        reportStore.set((current) => beginTargetedRetry(current, retrySections));
+      } else {
+        reportStore.reset(beginExtraction());
       }
-    }
-  }, []);
+      setStreamStatus("connected");
+
+      try {
+        await streamAnalysis(
+          (event) => {
+            if (runRef.current !== runId) return;
+            reportStore.apply(event);
+          },
+          controller.signal,
+          preferencesRef.current,
+          setStreamStatus,
+          { forceNew, retrySections },
+        );
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        if (runRef.current === runId) {
+          reportStore.set((current) =>
+            failReport(
+              current,
+              error instanceof Error ? error.message : "The article could not be analyzed.",
+            ),
+          );
+        }
+      }
+    },
+    [reportStore],
+  );
+
+  const retryIncompleteSections = useCallback(() => {
+    const sections: ReportSection[] = state.failedSections.length
+      ? state.failedSections
+      : ["supporting", "contradicting", "additional-context"];
+    void analyze(false, sections);
+  }, [analyze, state.failedSections]);
 
   const cancelAnalysis = useCallback(() => {
-    if (state.phase !== "extracting" && state.phase !== "analyzing") return;
+    if (!isAnalysisActive(state.phase)) return;
     abortRef.current?.abort();
-    setState((current) => cancelReport(current));
-  }, [state.phase]);
+    reportStore.set((current) => cancelReport(current));
+  }, [reportStore, state.phase]);
 
   useEffect(() => {
     // React StrictMode replays effects in development. The run id and abort
@@ -500,7 +529,7 @@ function AnalysisReport({ preferences, onOpenSettings }: AnalysisReportProps) {
       </header>
 
       <AnalysisProgress state={state} onCancel={cancelAnalysis} />
-      {streamStatus === "reconnecting" && state.phase === "analyzing" ? (
+      {streamStatus === "reconnecting" && isAnalysisActive(state.phase) ? (
         <p className="stream-reconnect">Reconnecting to the analysis…</p>
       ) : null}
 
@@ -526,7 +555,7 @@ function AnalysisReport({ preferences, onOpenSettings }: AnalysisReportProps) {
         ) : null}
 
         {state.phase === "partial" ? (
-          <PartialReportNotice onRetry={() => void analyze(true)} />
+          <PartialReportNotice onRetry={retryIncompleteSections} />
         ) : null}
 
         {state.compass.data ? (
@@ -697,7 +726,6 @@ function AnalysisReport({ preferences, onOpenSettings }: AnalysisReportProps) {
 
 function ChatGptApp() {
   const connection = usePerspecticaChatGpt();
-  const reduceMotion = useReducedMotion();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [runtime, setRuntime] = useState<RuntimeState | null>(null);
   const [runtimeError, setRuntimeError] = useState<string | null>(null);
@@ -755,7 +783,7 @@ function ChatGptApp() {
     };
   }, []);
 
-  const updatePreferences = (next: AnalysisPreferences) => {
+  const updatePreferences = (next: SettingsPreferences) => {
     if (!runtime) return;
     const updated: ExtensionPreferences = {
       ...runtime.preferences,
@@ -861,77 +889,55 @@ function ChatGptApp() {
 
   return (
     <>
-      <AnimatePresence initial={false} mode="wait">
-        <m.div
-          key={
-            runtimeError
-              ? "runtime-error"
-              : connection.isAuthenticated && (!runtime || articleAccess === "loading")
-                ? "runtime-loading"
-                : connection.isAuthenticated && articleAccess === "missing"
-                  ? "article-access"
-                  : connection.isAuthenticated && runtime && providerReady
-                    ? "analysis"
-                    : connection.isAuthenticated
-                      ? "search"
-                      : "login"
+      <div className="page-transition">{page}</div>
+      {settingsOpen ? (
+        <SettingsScreen
+          authenticated={connection.isAuthenticated}
+          preferences={
+            runtime?.preferences ?? { ...DEFAULT_ANALYSIS_PREFERENCES, mode: "balanced" }
           }
-          className="page-transition"
-          initial={reduceMotion ? false : { opacity: 0, y: 4 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={reduceMotion ? undefined : { opacity: 0, y: -4 }}
-          transition={{ duration: reduceMotion ? 0 : 0.18, ease: "easeOut" }}
-        >
-          {page}
-        </m.div>
-      </AnimatePresence>
-      <AnimatePresence>
-        {settingsOpen ? (
-          <SettingsScreen
-            authenticated={connection.isAuthenticated}
-            preferences={runtime?.preferences ?? DEFAULT_ANALYSIS_PREFERENCES}
-            onChange={updatePreferences}
-            onClose={() => setSettingsOpen(false)}
-            onDisconnect={connection.logout}
-            availableModels={connection.models}
-            searchProvider={runtime?.preferences.searchProvider}
-            hasExaKey={runtime?.hasExaKey}
-            onSearchProviderChange={updateSearchProvider}
-            onExaKeySaved={() => {
-              if (!runtime) return;
-              setRuntime({ ...runtime, hasExaKey: true });
-              setProviderReady(true);
-            }}
-            onExaKeyRemoved={() => {
-              if (!runtime) return;
-              setRuntime({ ...runtime, hasExaKey: false });
-              if (runtime.preferences.searchProvider === "exa") setProviderReady(false);
-            }}
-          />
-        ) : null}
-      </AnimatePresence>
+          onChange={updatePreferences}
+          onClose={() => setSettingsOpen(false)}
+          onDisconnect={connection.logout}
+          availableModels={connection.models}
+          searchProvider={runtime?.preferences.searchProvider}
+          hasExaKey={runtime?.hasExaKey}
+          onSearchProviderChange={updateSearchProvider}
+          onExaKeySaved={() => {
+            if (!runtime) return;
+            setRuntime({ ...runtime, hasExaKey: true });
+            setProviderReady(true);
+          }}
+          onExaKeyRemoved={() => {
+            if (!runtime) return;
+            setRuntime({ ...runtime, hasExaKey: false });
+            if (runtime.preferences.searchProvider === "exa") setProviderReady(false);
+          }}
+        />
+      ) : null}
     </>
   );
 }
 
 function DemoApp() {
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [preferences, setPreferences] = useState(DEFAULT_ANALYSIS_PREFERENCES);
+  const [preferences, setPreferences] = useState<SettingsPreferences>({
+    ...DEFAULT_ANALYSIS_PREFERENCES,
+    mode: "balanced",
+  });
 
   return (
     <>
       <AnalysisReport preferences={preferences} onOpenSettings={() => setSettingsOpen(true)} />
-      <AnimatePresence>
-        {settingsOpen ? (
-          <SettingsScreen
-            authenticated={false}
-            preferences={preferences}
-            onChange={setPreferences}
-            onClose={() => setSettingsOpen(false)}
-            onDisconnect={async () => undefined}
-          />
-        ) : null}
-      </AnimatePresence>
+      {settingsOpen ? (
+        <SettingsScreen
+          authenticated={false}
+          preferences={preferences}
+          onChange={setPreferences}
+          onClose={() => setSettingsOpen(false)}
+          onDisconnect={async () => undefined}
+        />
+      ) : null}
     </>
   );
 }

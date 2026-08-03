@@ -31,7 +31,7 @@ Everything runs inside the installed extension:
 4. The extension uses the user's connected ChatGPT account for inference.
 5. Research uses either the user's Exa API key or ChatGPT hosted web search when the selected
    account and model support it.
-6. Validated analysis events are saved in extension storage and streamed into the side panel.
+6. Validated pipeline events are appended to an IndexedDB journal and streamed into the side panel through a reconnectable runtime port.
 
 There is no Perspectica API, hosted database, localhost service, telemetry service, or required
 Codex installation.
@@ -62,19 +62,15 @@ or using the extension broadly.
 ## Project structure
 
 ```text
-apps/extension/       WXT Manifest V3 extension, side panel, background and offscreen runtime
-packages/analysis/    article lens, shared research orchestration and progressive event pipeline
-packages/compass/     seven-position political-spectrum scoring
-packages/contracts/   shared Zod schemas and protocol contracts
-packages/extraction/  page-to-article extraction
-packages/validation/  grounding, evidence and reader-copy validation
-datasets/              public aggregate calibration artifacts and methodology
-docs/                  architecture, privacy, release and product plans
+apps/extension/        WXT Manifest V3 extension, side panel, background and offscreen runtime
+packages/contracts/    shared Zod wire contracts, budgets, events and evidence graph types
+packages/extraction/   page-to-article extraction and deterministic ArticleIndex construction
+packages/intelligence/ Article Lens, adaptive planning, retrieval coordination and report projection
+docs/                   current architecture, privacy, release and product notes
 ```
 
-The implemented runtime is documented in [`docs/architecture.md`](docs/architecture.md). The
-adopted migration design and its decisions remain in
-[`docs/plans/2026-07-29-self-contained-extension-design.md`](docs/plans/2026-07-29-self-contained-extension-design.md).
+The implemented V2 runtime is documented in [`docs/architecture-v2.md`](docs/architecture-v2.md).
+Older planning notes under `docs/plans/` are historical and are not production architecture.
 
 ## Prerequisites
 
@@ -140,15 +136,16 @@ See [`docs/public-deployment.md`](docs/public-deployment.md) for the store check
 
 ## Analysis architecture
 
-Perspectica runs one Article Lens and six bounded research specialists. The specialists work in
-parallel across political context, bias, journalist context, supporting information,
-contradicting information, and additional context. Model concurrency and search concurrency are
-limited independently, while repeated searches and full source reads share a canonical-URL cache.
+V2 builds one compact `ArticleIndex`, creates an adaptive `AnalysisPlan`, and runs a global
+`RetrievalCoordinator` against a shared source ledger and evidence graph. Fast, balanced, and deep
+modes change passage, mission, concurrency, deadline, and output budgets. Evidence is validated
+once before it can serve any report section, and sections only project the ledger; the side panel
+never reconciles sources itself.
 
-Returned URLs must match sources the specialist actually read. Quotations must survive
-exact-excerpt validation. Wrong-lane and duplicate sources are reconciled before the final report.
-Each section is emitted as soon as it is useful, so one slow, empty, or failed section does not
-hold back the rest of the report.
+Exa uses bounded search requests with returned text/highlights. Native ChatGPT web search is one
+bounded global search workflow: its URL-attributed results are `search-summary` evidence and are
+never treated as page transcripts or quoteable excerpts. Login with ChatGPT remains the sole
+account/authentication path; Exa is an optional research provider key, not a second account system.
 
 ## Optional calibration tooling
 

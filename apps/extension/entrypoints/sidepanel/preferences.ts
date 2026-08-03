@@ -1,11 +1,8 @@
-import {
-  AnalysisPreferencesSchema,
-  type AnalysisModel,
-  type AnalysisPreferences,
-  type AnalysisReasoningEffort,
+import type {
+  AnalysisModel,
+  AnalysisPreferences,
+  AnalysisReasoningEffort,
 } from "@perspectica/contracts";
-
-const STORAGE_KEY = "perspectica.analysis-preferences.v1";
 
 export const DEFAULT_ANALYSIS_PREFERENCES: AnalysisPreferences = {
   model: "gpt-5.6-luna",
@@ -42,39 +39,3 @@ export const REASONING_EFFORTS: ReadonlyArray<{
   { value: "medium", label: "Medium" },
   { value: "high", label: "High" },
 ];
-
-interface StorageLike {
-  getItem(key: string): string | null;
-  setItem(key: string, value: string): void;
-}
-
-function availableStorage(): StorageLike | null {
-  try {
-    return globalThis.localStorage ?? null;
-  } catch {
-    return null;
-  }
-}
-
-export function readAnalysisPreferences(
-  storage: StorageLike | null = availableStorage(),
-): AnalysisPreferences {
-  if (!storage) return DEFAULT_ANALYSIS_PREFERENCES;
-
-  try {
-    const saved = storage.getItem(STORAGE_KEY);
-    if (!saved) return DEFAULT_ANALYSIS_PREFERENCES;
-    const parsed = AnalysisPreferencesSchema.safeParse(JSON.parse(saved));
-    return parsed.success ? parsed.data : DEFAULT_ANALYSIS_PREFERENCES;
-  } catch {
-    return DEFAULT_ANALYSIS_PREFERENCES;
-  }
-}
-
-export function saveAnalysisPreferences(
-  preferences: AnalysisPreferences,
-  storage: StorageLike | null = availableStorage(),
-): void {
-  if (!storage) return;
-  storage.setItem(STORAGE_KEY, JSON.stringify(AnalysisPreferencesSchema.parse(preferences)));
-}

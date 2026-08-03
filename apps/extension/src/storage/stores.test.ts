@@ -46,6 +46,7 @@ describe("extension stores", () => {
     await expect(store.get()).resolves.toMatchObject({
       model: "gpt-5.6-luna",
       reasoningEffort: "medium",
+      mode: "balanced",
       searchProvider: "exa",
       rememberChatGpt: true,
     });
@@ -122,7 +123,7 @@ describe("extension stores", () => {
           },
         },
         client: { extensionVersion: "0.1.0" },
-        preferences: { model: "gpt-5.6-luna", reasoningEffort: "medium" },
+        preferences: { model: "gpt-5.6-luna", reasoningEffort: "medium", mode: "balanced" },
       },
       searchProvider: "exa",
     });
@@ -152,5 +153,43 @@ describe("extension stores", () => {
       revision: current.revision + 1,
     }));
     await expect(store.getResume("job-1")).resolves.toBeUndefined();
+  });
+
+  it("persists and replays append-only event envelopes by sequence", async () => {
+    const storage = new MemoryStorage();
+    const store = new JobStore(storage);
+    await store.set(job("job-1"));
+    const event = {
+      type: "metadata.ready" as const,
+      analysisId: "analysis-1",
+      emittedAt: "2026-07-29T12:00:00.000Z",
+      data: {
+        title: "Example",
+        author: null,
+        publication: "Example News",
+        publishedAt: null,
+        contentType: "news" as const,
+      },
+    };
+    await store.appendEvent({
+      protocol: 2,
+      jobId: "job-1",
+      runToken: "run-job-1",
+      sequence: 1,
+      revision: 1,
+      event,
+    });
+    await store.appendEvent({
+      protocol: 2,
+      jobId: "job-1",
+      runToken: "run-job-1",
+      sequence: 2,
+      revision: 2,
+      event,
+    });
+
+    await expect(store.getEventsSince("job-1", 1)).resolves.toEqual([
+      expect.objectContaining({ sequence: 2, event }),
+    ]);
   });
 });

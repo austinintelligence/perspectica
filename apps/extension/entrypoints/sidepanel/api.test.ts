@@ -1,11 +1,11 @@
-import type { AnalysisEvent } from "@perspectica/contracts";
+import type { PipelineEvent } from "@perspectica/contracts/events";
 import type { AnalysisPreferences } from "@perspectica/contracts";
 import type { AnalysisJob } from "../../src/runtime/messages";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const runtime = vi.hoisted(() => ({
   sendRuntimeRequest: vi.fn(),
-  subscribeRuntimePush: vi.fn(),
+  subscribeRuntimePushWithStatus: vi.fn(),
 }));
 
 vi.mock("../../src/runtime/client", () => runtime);
@@ -18,7 +18,13 @@ import {
   streamAnalysis,
 } from "./api";
 
-function job(status: AnalysisJob["status"]): AnalysisJob {
+const preferences: AnalysisPreferences = { model: "gpt-5.6-luna", reasoningEffort: "medium" };
+const emittedAt = "2026-08-02T12:00:00.000Z";
+
+function job(
+  status: AnalysisJob["status"] = "analyzing",
+  overrides: Partial<AnalysisJob> = {},
+): AnalysisJob {
   return {
     id: "job-1",
     tabId: 1,
@@ -26,61 +32,10 @@ function job(status: AnalysisJob["status"]): AnalysisJob {
     articleFingerprint: "article-1",
     analysisConfigFingerprint: null,
     status,
-    createdAt: "2026-07-29T00:00:00.000Z",
-    updatedAt: "2026-07-29T00:00:01.000Z",
+    createdAt: emittedAt,
+    updatedAt: emittedAt,
     error: null,
     events: [],
-    runToken: null,
-    revision: 0,
-    lastEventSequence: 0,
-  };
-}
-
-const preferences: AnalysisPreferences = {
-  model: "gpt-5.6-luna",
-  reasoningEffort: "medium",
-};
-
-const emittedAt = "2026-07-29T00:00:00.000Z";
-
-function event(
-  analysisId: string,
-  index: number,
-  type: AnalysisEvent["type"] = "metadata.ready",
-): AnalysisEvent {
-  if (type === "analysis.completed") {
-    return {
-      type,
-      analysisId,
-      emittedAt: new Date(Date.parse(emittedAt) + index).toISOString(),
-      data: {
-        completedAt: emittedAt,
-        durationMs: index,
-        status: "complete",
-        failedSections: [],
-      },
-    };
-  }
-  return {
-    type,
-    analysisId,
-    emittedAt: new Date(Date.parse(emittedAt) + index).toISOString(),
-    data: {
-      title: `Article ${index}`,
-      author: null,
-      publication: "Example News",
-      publishedAt: null,
-      contentType: "news",
-    },
-  } as AnalysisEvent;
-}
-
-function analysisJob(
-  status: AnalysisJob["status"],
-  overrides: Partial<AnalysisJob> = {},
-): AnalysisJob {
-  return {
-    ...job(status),
     runToken: "run-1",
     revision: 0,
     lastEventSequence: 0,
@@ -88,118 +43,68 @@ function analysisJob(
   };
 }
 
-function setActiveTab(tab: { id: number; url: string }): void {
-  (globalThis as unknown as { chrome?: { tabs?: { query: () => Promise<unknown[]> } } }).chrome = {
-    tabs: { query: vi.fn(async () => [tab]) },
+function event(type: PipelineEvent["type"], sequence = 1): PipelineEvent {
+  if (type === "analysis.completed") {
+    return {
+      type,
+      analysisId: "analysis-1",
+      emittedAt,
+      data: {
+        completedAt: emittedAt,
+        durationMs: sequence,
+        status: "complete",
+        failedSections: [],
+        acceptedSources: 1,
+        acceptedAssertions: 1,
+      },
+    };
+  }
+  if (type === "phase.changed") {
+    return {
+      type,
+      analysisId: "analysis-1",
+      emittedAt,
+      data: { phase: "retrieving", message: `phase ${sequence}` },
+    };
+  }
+  return {
+    type: "metadata.ready",
+    analysisId: "analysis-1",
+    emittedAt,
+    data: {
+      title: `Article ${sequence}`,
+      author: null,
+      publication: "Example News",
+      publishedAt: null,
+      contentType: "news",
+    },
   };
 }
 
-function setupRuntime(initial: AnalysisJob | null): {
+function setup(initial: AnalysisJob = job()): {
   emit: (message: unknown) => void;
+  status: (value: "connected" | "reconnecting") => void;
   unsubscribe: ReturnType<typeof vi.fn>;
 } {
   let listener: ((message: unknown) => void) | undefined;
+  let statusListener: ((status: "connected" | "reconnecting") => void) | undefined;
   const unsubscribe = vi.fn();
-  runtime.subscribeRuntimePush.mockImplementation((next: (message: unknown) => void) => {
-    listener = next;
-    return unsubscribe;
-  });
+  runtime.subscribeRuntimePushWithStatus.mockImplementation(
+    (
+      next: (message: unknown) => void,
+      onStatus?: (status: "connected" | "reconnecting") => void,
+    ) => {
+      listener = next;
+      statusListener = onStatus;
+      onStatus?.("connected");
+      return unsubscribe;
+    },
+  );
   runtime.sendRuntimeRequest.mockImplementation(async (request: { type: string }) => {
-    if (request.type === "runtime.getState") {
-      return {
-        runtimeProtocol: 1,
-        auth: {
-          status: "authenticated",
-          account: null,
-          remembered: true,
-          models: [],
-          error: null,
-        },
-        preferences: { ...preferences, searchProvider: "chatgpt", rememberChatGpt: true },
-        activeJob: initial,
-        hasExaKey: false,
-      };
-    }
-    if (request.type === "analysis.getJob") return initial;
-    if (request.type === "analysis.start") {
-      return initial ?? analysisJob("analyzing", { id: "new-job", tabId: 7 });
-    }
-    return { ok: true };
-  });
-  return {
-    emit: (message: unknown) => listener?.(message),
-    unsubscribe,
-  };
-}
-
-beforeEach(() => {
-  runtime.sendRuntimeRequest.mockReset();
-  runtime.subscribeRuntimePush.mockReset();
-  setActiveTab({ id: 1, url: "https://example.com/article" });
-});
-
-describe("analysis stream resume policy", () => {
-  it("resumes active and already-renderable reports", () => {
-    expect(isResumableJob(job("queued"))).toBe(true);
-    expect(isResumableJob(job("analyzing"))).toBe(true);
-    expect(isResumableJob(job("complete"))).toBe(true);
-    expect(isResumableJob(job("partial"))).toBe(true);
-  });
-
-  it("does not loop a failed or cancelled job", () => {
-    expect(isResumableJob(job("failed"))).toBe(false);
-    expect(isResumableJob(job("cancelled"))).toBe(false);
-    expect(isResumableJob(null)).toBe(false);
-  });
-
-  it("only replays a report for the same active article tab", () => {
-    const current = job("complete");
-    expect(isResumableJobForTab(current, { id: 1, url: current.tabUrl })).toBe(true);
-    expect(isResumableJobForTab(current, { id: 2, url: current.tabUrl })).toBe(false);
-    expect(isResumableJobForTab(current, { id: 1, url: "https://example.com/other" })).toBe(false);
-    expect(isResumableJobForTab(current, { id: 1, url: `${current.tabUrl}#comments` })).toBe(true);
-  });
-});
-
-describe("ChatGPT host access", () => {
-  it("requests only the two OpenAI origins required by authentication and inference", async () => {
-    const request = vi.fn(async () => true);
-    vi.stubGlobal("chrome", { permissions: { request } });
-
-    await expect(requestChatGptHostAccess()).resolves.toBeUndefined();
-    expect(request).toHaveBeenCalledWith({ origins: [...CHATGPT_HOST_ORIGINS] });
-  });
-
-  it("stops before authentication when the user declines host access", async () => {
-    vi.stubGlobal("chrome", { permissions: { request: vi.fn(async () => false) } });
-
-    await expect(requestChatGptHostAccess()).rejects.toThrow("ChatGPT access was not granted");
-  });
-});
-
-describe("streamAnalysis runtime replay", () => {
-  it("replays a wrapped 128-event snapshot instead of using a stale index cursor", async () => {
-    const firstEvents = Array.from({ length: 128 }, (_, index) => event("analysis-1", index));
-    const wrappedEvent = event("analysis-1", 128);
-    const initial = analysisJob("analyzing", {
-      id: "job-1",
-      tabId: 1,
-      revision: 128,
-      lastEventSequence: 128,
-      events: firstEvents,
-    });
-    const wrapped = {
-      ...initial,
-      status: "complete" as const,
-      revision: 129,
-      lastEventSequence: 129,
-      events: [...firstEvents.slice(1), wrappedEvent],
-    };
-    const stream = setupRuntime(initial);
-    runtime.sendRuntimeRequest.mockImplementation(async (request: { type: string }) => {
-      if (request.type === "runtime.getState") {
+    switch (request.type) {
+      case "runtime.getState":
         return {
-          runtimeProtocol: 1,
+          runtimeProtocol: 6,
           auth: {
             status: "authenticated",
             account: null,
@@ -207,116 +112,66 @@ describe("streamAnalysis runtime replay", () => {
             models: [],
             error: null,
           },
-          preferences: { ...preferences, searchProvider: "chatgpt", rememberChatGpt: true },
+          preferences: {
+            ...preferences,
+            mode: "balanced",
+            searchProvider: "chatgpt",
+            rememberChatGpt: true,
+          },
           activeJob: initial,
           hasExaKey: false,
         };
-      }
-      if (request.type === "analysis.getJob") return initial;
-      if (request.type === "analysis.start") return initial;
-      return { ok: true };
-    });
-
-    const received: AnalysisEvent[] = [];
-    const pending = streamAnalysis(received.push.bind(received), undefined, preferences);
-    await vi.waitFor(() => expect(runtime.subscribeRuntimePush).toHaveBeenCalledOnce());
-    stream.emit({ type: "analysis.jobChanged", job: wrapped });
-    await pending;
-
-    expect(received).toHaveLength(129);
-    expect(received.at(-1)).toEqual(wrappedEvent);
-    expect(stream.unsubscribe).toHaveBeenCalledOnce();
-  });
-
-  it("deduplicates repeated deltas and ignores stale revision, wrong job, and wrong token", async () => {
-    const initial = analysisJob("analyzing", { id: "job-1", tabId: 1 });
-    const stream = setupRuntime(initial);
-    const received: AnalysisEvent[] = [];
-    const pending = streamAnalysis(received.push.bind(received), undefined, preferences);
-    await vi.waitFor(() => expect(runtime.subscribeRuntimePush).toHaveBeenCalledOnce());
-    const next = event("analysis-1", 1);
-    stream.emit({
-      type: "analysis.eventDelta",
-      jobId: "job-1",
-      runToken: "run-1",
-      revision: 1,
-      sequence: 1,
-      event: next,
-    });
-    stream.emit({
-      type: "analysis.eventDelta",
-      jobId: "other-job",
-      runToken: "run-1",
-      revision: 1,
-      sequence: 1,
-      event: next,
-    });
-    stream.emit({
-      type: "analysis.eventDelta",
-      jobId: "job-1",
-      runToken: "wrong-token",
-      revision: 2,
-      sequence: 2,
-      event: event("analysis-1", 2),
-    });
-    stream.emit({
-      type: "analysis.eventDelta",
-      jobId: "job-1",
-      runToken: "run-1",
-      revision: 0,
-      sequence: 3,
-      event: event("analysis-1", 3),
-    });
-    stream.emit({
-      type: "analysis.eventDelta",
-      jobId: "job-1",
-      runToken: "run-1",
-      revision: 2,
-      sequence: 2,
-      event: next,
-    });
-    stream.emit({
-      type: "analysis.jobChanged",
-      job: { ...initial, status: "complete", revision: 3, lastEventSequence: 3, events: [] },
-    });
-
-    await expect(pending).resolves.toBeUndefined();
-    expect(received).toEqual([next]);
-  });
-
-  it("rejects failed and cancelled terminal snapshots and cleans the subscription", async () => {
-    for (const status of ["failed", "cancelled"] as const) {
-      runtime.subscribeRuntimePush.mockClear();
-      const initial = analysisJob("analyzing", { id: `job-${status}`, tabId: 1 });
-      const stream = setupRuntime(initial);
-      const pending = streamAnalysis(() => undefined, undefined, preferences);
-      await vi.waitFor(() => expect(runtime.subscribeRuntimePush).toHaveBeenCalledOnce());
-      stream.emit({
-        type: "analysis.jobChanged",
-        job: {
-          ...initial,
-          status,
-          revision: 1,
-          lastEventSequence: 1,
-          error: status === "failed" ? "provider unavailable" : null,
-        },
-      });
-      await expect(pending).rejects.toMatchObject({
-        name: status === "cancelled" ? "AbortError" : "Error",
-      });
-      expect(stream.unsubscribe).toHaveBeenCalledOnce();
+      case "analysis.start":
+        return initial;
+      case "analysis.getEventsSince":
+        return { jobId: initial.id, lastSequence: 0, events: [], complete: false };
+      case "analysis.getJob":
+        return initial;
+      default:
+        return { ok: true };
     }
   });
+  return {
+    emit: (message) => listener?.(message),
+    status: (value) => statusListener?.(value),
+    unsubscribe,
+  };
+}
 
-  it("cleans the subscription and polling timer when the first job replay fails", async () => {
-    vi.useFakeTimers();
-    try {
-      const initial = analysisJob("analyzing", { id: "job-replay-failure", tabId: 1 });
-      const stream = setupRuntime(initial);
-      runtime.sendRuntimeRequest.mockImplementation(async (request: { type: string }) => {
-        if (request.type === "runtime.getState") {
+beforeEach(() => {
+  runtime.sendRuntimeRequest.mockReset();
+  runtime.subscribeRuntimePushWithStatus.mockReset();
+});
+
+describe("ChatGPT access and job reuse", () => {
+  it("requests only the OpenAI origins needed by the connection", async () => {
+    const request = vi.fn(async () => true);
+    vi.stubGlobal("chrome", { permissions: { request } });
+    await expect(requestChatGptHostAccess()).resolves.toBeUndefined();
+    expect(request).toHaveBeenCalledWith({ origins: [...CHATGPT_HOST_ORIGINS] });
+  });
+
+  it("keeps terminal jobs renderable but does not resume failed or cancelled jobs", () => {
+    expect(isResumableJob(job("complete"))).toBe(true);
+    expect(isResumableJob(job("partial"))).toBe(true);
+    expect(isResumableJob(job("failed"))).toBe(false);
+    expect(isResumableJob(job("cancelled"))).toBe(false);
+    expect(
+      isResumableJobForTab(job("complete"), { id: 1, url: "https://example.com/article#comments" }),
+    ).toBe(true);
+  });
+});
+
+describe("V2 append-only stream replay", () => {
+  it("replays journal events after reconnect and ignores duplicate sequences", async () => {
+    const initial = job();
+    const stream = setup(initial);
+    let replayCount = 0;
+    runtime.sendRuntimeRequest.mockImplementation(
+      async (request: { type: string; lastSequence?: number }) => {
+        if (request.type === "runtime.getState")
           return {
-            runtimeProtocol: 1,
+            runtimeProtocol: 6,
             auth: {
               status: "authenticated",
               account: null,
@@ -324,93 +179,88 @@ describe("streamAnalysis runtime replay", () => {
               models: [],
               error: null,
             },
-            preferences: { ...preferences, searchProvider: "chatgpt", rememberChatGpt: true },
+            preferences: {
+              ...preferences,
+              mode: "balanced",
+              searchProvider: "chatgpt",
+              rememberChatGpt: true,
+            },
             activeJob: initial,
             hasExaKey: false,
           };
-        }
         if (request.type === "analysis.start") return initial;
-        if (request.type === "analysis.getJob") throw new Error("runtime replay unavailable");
-        return { ok: true };
-      });
-
-      await expect(streamAnalysis(() => undefined)).rejects.toThrow("runtime replay unavailable");
-      expect(stream.unsubscribe).toHaveBeenCalledOnce();
-      expect(
-        runtime.sendRuntimeRequest.mock.calls.filter(
-          ([request]) => request.type === "analysis.getJob",
-        ),
-      ).toHaveLength(1);
-
-      await vi.advanceTimersByTimeAsync(4_500);
-      expect(
-        runtime.sendRuntimeRequest.mock.calls.filter(
-          ([request]) => request.type === "analysis.getJob",
-        ),
-      ).toHaveLength(1);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("sends one cancel request and cleans up when the caller aborts", async () => {
-    const initial = analysisJob("analyzing", { id: "job-1", tabId: 1 });
-    const stream = setupRuntime(initial);
-    const controller = new AbortController();
-    let resolveInitial!: (job: AnalysisJob) => void;
-    runtime.sendRuntimeRequest.mockImplementation(async (request: { type: string }) => {
-      if (request.type === "runtime.getState") {
-        return {
-          runtimeProtocol: 1,
-          auth: {
-            status: "authenticated",
-            account: null,
-            remembered: true,
-            models: [],
-            error: null,
-          },
-          preferences: { ...preferences, searchProvider: "chatgpt", rememberChatGpt: true },
-          activeJob: null,
-          hasExaKey: false,
-        };
-      }
-      if (request.type === "preferences.update") return request;
-      if (request.type === "analysis.start") return initial;
-      if (request.type === "analysis.getJob") {
-        return new Promise<AnalysisJob>((resolve) => {
-          resolveInitial = resolve;
-        });
-      }
-      return { ok: true };
+        if (request.type === "analysis.getEventsSince") {
+          replayCount += 1;
+          return replayCount === 1
+            ? {
+                jobId: initial.id,
+                lastSequence: 1,
+                events: [
+                  {
+                    jobId: initial.id,
+                    runToken: "run-1",
+                    sequence: 1,
+                    revision: 1,
+                    event: event("metadata.ready", 1),
+                  },
+                ],
+                complete: false,
+              }
+            : {
+                jobId: initial.id,
+                lastSequence: 2,
+                events: [
+                  {
+                    jobId: initial.id,
+                    runToken: "run-1",
+                    sequence: 1,
+                    revision: 1,
+                    event: event("metadata.ready", 1),
+                  },
+                  {
+                    jobId: initial.id,
+                    runToken: "run-1",
+                    sequence: 2,
+                    revision: 2,
+                    event: event("phase.changed", 2),
+                  },
+                ],
+                complete: false,
+              };
+        }
+        return initial;
+      },
+    );
+    const received: PipelineEvent[] = [];
+    const pending = streamAnalysis(received.push.bind(received), undefined, preferences);
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+    stream.status("reconnecting");
+    stream.status("connected");
+    await vi.waitFor(() => expect(received).toHaveLength(2));
+    stream.emit({
+      type: "analysis.eventDelta",
+      jobId: initial.id,
+      runToken: "run-1",
+      revision: 3,
+      sequence: 3,
+      event: event("analysis.completed", 3),
     });
-    const pending = streamAnalysis(() => undefined, controller.signal, preferences);
-    await vi.waitFor(() => expect(runtime.subscribeRuntimePush).toHaveBeenCalledOnce());
-    const assertion = expect(pending).rejects.toMatchObject({ name: "AbortError" });
-    controller.abort();
-    resolveInitial(initial);
-    await assertion;
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(
-      runtime.sendRuntimeRequest.mock.calls.filter(
-        ([request]) => request.type === "analysis.cancel",
-      ),
-    ).toHaveLength(1);
+    await expect(pending).resolves.toBeUndefined();
+    expect(received.map((value) => value.type)).toEqual([
+      "metadata.ready",
+      "phase.changed",
+      "analysis.completed",
+    ]);
     expect(stream.unsubscribe).toHaveBeenCalledOnce();
   });
 
-  it("starts a new run for a different active tab and can force a retry on the same tab", async () => {
-    const finished = analysisJob("complete", {
-      id: "old-job",
-      tabId: 1,
-      tabUrl: "https://example.com/article",
-    });
-    setupRuntime(finished);
-    const received: AnalysisEvent[] = [];
+  it("terminates from a replayed completion without waiting for a live delta", async () => {
+    const initial = job("complete", { revision: 1, lastEventSequence: 1 });
+    const stream = setup(initial);
     runtime.sendRuntimeRequest.mockImplementation(async (request: { type: string }) => {
-      if (request.type === "runtime.getState") {
+      if (request.type === "runtime.getState")
         return {
-          runtimeProtocol: 1,
+          runtimeProtocol: 6,
           auth: {
             status: "authenticated",
             account: null,
@@ -418,33 +268,94 @@ describe("streamAnalysis runtime replay", () => {
             models: [],
             error: null,
           },
-          preferences: { ...preferences, searchProvider: "chatgpt", rememberChatGpt: true },
-          activeJob: finished,
+          preferences: {
+            ...preferences,
+            mode: "balanced",
+            searchProvider: "chatgpt",
+            rememberChatGpt: true,
+          },
+          activeJob: initial,
           hasExaKey: false,
         };
-      }
-      if (request.type === "preferences.update") return request;
-      if (request.type === "analysis.start")
-        return analysisJob("complete", { id: "new-job", tabId: 2 });
-      if (request.type === "analysis.getJob")
-        return analysisJob("complete", { id: "new-job", tabId: 2 });
-      return { ok: true };
+      if (request.type === "analysis.start") return initial;
+      if (request.type === "analysis.getEventsSince")
+        return {
+          jobId: initial.id,
+          lastSequence: 1,
+          events: [
+            {
+              jobId: initial.id,
+              runToken: "run-1",
+              sequence: 1,
+              revision: 1,
+              event: event("analysis.completed"),
+            },
+          ],
+          complete: true,
+        };
+      return initial;
     });
-    setActiveTab({ id: 2, url: "https://example.com/other" });
+    const received: PipelineEvent[] = [];
     await expect(
       streamAnalysis(received.push.bind(received), undefined, preferences),
     ).resolves.toBeUndefined();
-    expect(runtime.sendRuntimeRequest).toHaveBeenCalledWith(
-      expect.objectContaining({ type: "analysis.start" }),
-    );
+    expect(received).toHaveLength(1);
+  });
 
-    runtime.sendRuntimeRequest.mockClear();
-    setActiveTab({ id: 1, url: "https://example.com/article" });
-    await expect(
-      streamAnalysis(() => undefined, undefined, preferences, undefined, { forceNew: true }),
-    ).resolves.toBeUndefined();
+  it("rejects terminal failure and sends one cancellation on abort", async () => {
+    const initial = job();
+    const stream = setup(initial);
+    const pending = streamAnalysis(() => undefined, undefined, preferences);
+    await vi.waitFor(() => expect(runtime.subscribeRuntimePushWithStatus).toHaveBeenCalledOnce());
+    stream.emit({
+      type: "analysis.eventDelta",
+      jobId: initial.id,
+      runToken: "run-1",
+      revision: 1,
+      sequence: 1,
+      event: {
+        type: "analysis.failed",
+        analysisId: "analysis-1",
+        emittedAt,
+        data: { message: "provider unavailable", retryable: true },
+      },
+    });
+    await expect(pending).rejects.toThrow("provider unavailable");
+
+    runtime.sendRuntimeRequest.mockReset();
+    const second = setup(job("analyzing", { id: "job-2" }));
+    runtime.sendRuntimeRequest.mockImplementation(async (request: { type: string }) => {
+      if (request.type === "runtime.getState")
+        return {
+          runtimeProtocol: 6,
+          auth: {
+            status: "authenticated",
+            account: null,
+            remembered: true,
+            models: [],
+            error: null,
+          },
+          preferences: {
+            ...preferences,
+            mode: "balanced",
+            searchProvider: "chatgpt",
+            rememberChatGpt: true,
+          },
+          activeJob: null,
+          hasExaKey: false,
+        };
+      if (request.type === "analysis.start") return job("analyzing", { id: "job-2" });
+      if (request.type === "analysis.getEventsSince") return new Promise(() => {});
+      return { ok: true };
+    });
+    const controller = new AbortController();
+    const aborted = streamAnalysis(() => undefined, controller.signal, preferences);
+    await vi.waitFor(() => expect(runtime.subscribeRuntimePushWithStatus).toHaveBeenCalled());
+    controller.abort();
+    await expect(aborted).rejects.toMatchObject({ name: "AbortError" });
     expect(runtime.sendRuntimeRequest).toHaveBeenCalledWith(
-      expect.objectContaining({ type: "analysis.start", forceNew: true }),
+      expect.objectContaining({ type: "analysis.cancel", jobId: "job-2" }),
     );
+    expect(second.unsubscribe).toHaveBeenCalledOnce();
   });
 });

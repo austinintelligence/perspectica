@@ -1,9 +1,12 @@
-import { ArticleDocumentSchema, type AnalysisEvent } from "@perspectica/contracts";
+import { ArticleDocumentSchema } from "@perspectica/contracts";
+import type { AnalysisEnvelope, PipelineEvent } from "@perspectica/contracts/events";
+import type { ReportSection } from "@perspectica/contracts/report";
 import { ChatGptSessionManager } from "../auth/chatgpt-session";
 import { ChromeJsonStorageArea, restrictExtensionStorage } from "../storage/areas";
 import { CredentialVault } from "../storage/credential-vault";
 import { IndexedDbCryptoKeyStore } from "../storage/indexed-db-key-store";
 import { JobStore } from "../storage/job-store";
+import { EvidenceCache } from "../storage/evidence-cache";
 import { PreferencesStore } from "../storage/preferences-store";
 import {
   AnalysisJobSchema,
@@ -56,10 +59,14 @@ function now(): string {
   return new Date().toISOString();
 }
 
-function formatAnalysisLogs(job: AnalysisJob, logs: AnalysisLogEntry[]): string {
-  const metadata = job.events.find((event) => event.type === "metadata.ready");
-  const analysis = job.events.find((event) => event.type === "analysis.started");
-  const completed = job.events.find((event) => event.type === "analysis.completed");
+function formatAnalysisLogs(
+  job: AnalysisJob,
+  logs: AnalysisLogEntry[],
+  events: PipelineEvent[],
+): string {
+  const metadata = events.find((event) => event.type === "metadata.ready");
+  const analysis = events.find((event) => event.type === "analysis.started");
+  const completed = events.find((event) => event.type === "analysis.completed");
   const lines = [
     "Perspectica analysis telemetry",
     `Exported: ${now()}`,
@@ -89,8 +96,8 @@ function formatAnalysisLogs(job: AnalysisJob, logs: AnalysisLogEntry[]): string 
     );
     if (entry.payload) lines.push(serializeRedacted(entry.payload) ?? "[redacted]");
   }
-  lines.push("", `Analysis events (${job.events.length})`);
-  for (const event of job.events) {
+  lines.push("", `Analysis events (${events.length})`);
+  for (const event of events) {
     lines.push(
       "",
       `${event.emittedAt} ${event.type}`,
@@ -215,6 +222,7 @@ export class BackgroundController {
   );
   private readonly preferences = new PreferencesStore(this.local);
   private readonly jobs = new JobStore(this.local);
+  private readonly researchCache = new EvidenceCache();
   private readonly auth = new ChatGptSessionManager(this.session, this.local, this.vault);
   private initialization: Promise<void> | null = null;
   private readonly ports = new Set<chrome.runtime.Port>();
@@ -413,6 +421,7 @@ export class BackgroundController {
         preferences: {
           model: preferences.model,
           reasoningEffort: preferences.reasoningEffort,
+          mode: preferences.mode,
         },
       },
       searchProvider: preferences.searchProvider,
@@ -501,6 +510,61 @@ export class BackgroundController {
     return cancelled;
   }
 
+  private async retryAnalysis(
+    jobId: string,
+    sections: readonly ReportSection[],
+  ): Promise<AnalysisJob> {
+    const current = await this.jobs.get(jobId);
+    if (!current) throw new Error("That analysis job no longer exists.");
+    if (current.status !== "partial") {
+      throw new Error("Targeted retry is available only for a partial analysis.");
+    }
+    if (!current.runToken) throw new Error("That analysis job has no resumable run token.");
+    const resume = await this.jobs.getResume(jobId);
+    if (!resume || resume.runToken !== current.runToken) {
+      throw new Error("The bounded retry context is unavailable. Start a new analysis.");
+    }
+    await this.auth.getFreshTokens();
+    const retrying = await this.jobs.update(jobId, (job) => {
+      if (job.status !== "partial" || job.runToken !== current.runToken) return undefined;
+      return {
+        ...job,
+        status: "analyzing",
+        revision: job.revision + 1,
+        updatedAt: now(),
+        error: null,
+      };
+    });
+    if (!retrying) throw new Error("That analysis job changed before retry could start.");
+    await this.publish({ type: "analysis.jobChanged", job: retrying });
+    try {
+      await ensureCompatibleOffscreenDocument();
+      await chrome.runtime.sendMessage(
+        OffscreenCommandSchema.parse({
+          type: "offscreen.analysis.retry",
+          protocol: PERSPECTICA_RUNTIME_PROTOCOL,
+          jobId,
+          runToken: retrying.runToken,
+          initialSequence: retrying.lastEventSequence,
+          request: resume.request,
+          searchProvider: resume.searchProvider,
+          sections,
+        }),
+      );
+    } catch (error) {
+      const failed = await this.jobs.update(jobId, (job) => ({
+        ...job,
+        status: "failed",
+        revision: job.revision + 1,
+        updatedAt: now(),
+        error: publicError(error, "Perspectica could not start the bounded section retry."),
+      }));
+      if (failed) await this.publish({ type: "analysis.jobChanged", job: failed });
+      throw error;
+    }
+    return retrying;
+  }
+
   private async cancelActiveAnalysisForDisconnect(): Promise<void> {
     const active = await this.jobs.getActive();
     if (active && !terminal(active.status)) await this.cancelAnalysis(active.id);
@@ -569,6 +633,7 @@ export class BackgroundController {
               preferences: {
                 model: preferences.model,
                 reasoningEffort: preferences.reasoningEffort,
+                mode: preferences.mode,
               },
             }),
           )) as { ok?: boolean; data?: unknown; error?: string } | undefined;
@@ -581,17 +646,33 @@ export class BackgroundController {
         }
         case "analysis.start":
           return ok(request.requestId, await this.startAnalysis(request.forceNew ?? false));
+        case "analysis.retry":
+          return ok(request.requestId, await this.retryAnalysis(request.jobId, request.sections));
         case "analysis.getJob": {
           const job = await this.jobs.get(request.jobId);
           if (!job) throw new Error("That analysis job was not found.");
           return ok(request.requestId, job);
         }
+        case "analysis.getEventsSince": {
+          const job = await this.jobs.get(request.jobId);
+          if (!job) throw new Error("That analysis job was not found.");
+          const events = await this.jobs.getEventsSince(request.jobId, request.lastSequence);
+          return ok(request.requestId, {
+            jobId: request.jobId,
+            lastSequence: job.lastEventSequence,
+            events,
+            complete: terminal(job.status),
+          });
+        }
         case "analysis.getLogs": {
           const job = await this.jobs.getActive();
           if (!job) throw new Error("Run an analysis before copying logs.");
           const logs = await this.jobs.getLogs(job.id);
+          const events = (await this.jobs.getEventsSince(job.id, 0)).map(
+            (envelope) => envelope.event,
+          );
           return ok(request.requestId, {
-            text: formatAnalysisLogs(job, logs),
+            text: formatAnalysisLogs(job, logs, events),
             entryCount: logs.length,
             jobId: job.id,
           });
@@ -602,6 +683,9 @@ export class BackgroundController {
           await this.jobs.clearLogs(job.id);
           return ok(request.requestId, { removed: true, jobId: job.id });
         }
+        case "research.cache.clear":
+          await this.researchCache.clear();
+          return ok(request.requestId, { removed: true });
         case "analysis.cancel":
           return ok(request.requestId, await this.cancelAnalysis(request.jobId));
       }
@@ -625,6 +709,7 @@ export class BackgroundController {
           return ok(request.requestId, {});
         }
         case "internal.analysis.event": {
+          let envelope: AnalysisEnvelope | null = null;
           const updated = await this.jobs.update(request.jobId, (job) => {
             if (
               !job.runToken ||
@@ -635,18 +720,34 @@ export class BackgroundController {
               return undefined;
             }
             const completed =
-              request.event.type === "analysis.completed" ? request.event.data.status : null;
+              request.event.type === "analysis.completed"
+                ? request.event.data.status
+                : request.event.type === "analysis.failed"
+                  ? "failed"
+                  : request.event.type === "analysis.cancelled"
+                    ? "cancelled"
+                    : null;
+            const revision = job.revision + 1;
+            envelope = {
+              protocol: 2,
+              jobId: request.jobId,
+              runToken: request.runToken,
+              sequence: request.sequence,
+              revision,
+              event: request.event,
+            };
             return {
               ...job,
-              events: [...job.events, request.event].slice(-128),
+              events: [],
               status: completed ?? "analyzing",
-              revision: job.revision + 1,
+              revision,
               lastEventSequence: request.sequence,
               updatedAt: now(),
               error: null,
             };
           });
           if (!updated) return ok(request.requestId, { ignored: true });
+          if (envelope) await this.jobs.appendEvent(envelope);
           await this.publish({ type: "analysis.jobChanged", job: updated });
           await this.publish({
             type: "analysis.eventDelta",
