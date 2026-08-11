@@ -1,167 +1,101 @@
 # Perspectica
 
-Perspectica is a self-contained Chrome side-panel extension for source-grounded news
-transparency. It examines political framing, bias signals, journalist context, supporting and
-contradicting information, and the sources cited by an article.
+Understand the story behind a story.
 
-Perspectica helps readers inspect an article. It does not replace reading the article, determine
-whether a person is trustworthy, or assign a permanent political label to a publication.
+Perspectica is a Chrome side panel that helps you examine an article's framing, evidence, author and publication context, supporting information, contradicting information, and cited sources before you decide what to believe or share.
 
-## About us
+It is built for readers who want more context without opening ten tabs—and for developers interested in building careful, source-grounded AI experiences inside the browser.
 
-Perspectica was created by:
+## What a reader gets
 
-- **Austin Morgan** — Developer & AI orchestration
-- **Lathik Ram C.** — Concept lead, UI design & outreach
-- **Mathew Estis** — Developer & project coordination
-- **Jordan Allen** — Brand design & QA testing
+When you start an analysis, Perspectica can help you inspect:
 
-The same team credits are available from the extension's first-run **About us** panel.
+- the article's main claims and framing signals;
+- relevant context about the publication and byline;
+- supporting and contradicting information from selected research providers;
+- the sources behind each report section;
+- the difference between an article's own text and outside research.
+
+Perspectica is not a truth oracle. It does not replace reading the article, decide whether a person is trustworthy, or assign a permanent political label to a publication. Its job is to make the reasoning and sources easier to inspect.
 
 ## How it works
 
 Everything runs inside the installed extension:
 
-1. The user opens Perspectica and chooses **Login with ChatGPT**. Chrome requests only the narrow
-   OpenAI origins needed for the device flow and inference.
-2. During article-access onboarding, the user separately grants a remembered all-sites permission
-   so Perspectica can extract the active page when a report starts or is reopened.
-3. An offscreen extension document runs the analysis pipeline so MV3 service-worker suspension
-   does not interrupt longer work.
-4. The extension uses the user's connected ChatGPT account for inference.
-5. Research uses either the user's Exa API key or ChatGPT hosted web search when the selected
-   account and model support it.
-6. Validated pipeline events are appended to an IndexedDB journal and streamed into the side panel through a reconnectable runtime port.
+1. Open Perspectica from Chrome's side panel and choose **Login with ChatGPT**.
+2. During onboarding, separately allow article access when you want to analyze the active page.
+3. Perspectica extracts the active article only when an analysis starts or a saved report is reopened.
+4. The extension builds a structured article index and an analysis plan.
+5. The selected AI and search providers research the claims within bounded budgets.
+6. Validated evidence is written to a local journal and projected into the side panel.
 
-There is no Perspectica API, hosted database, localhost service, telemetry service, or required
-Codex installation.
+There is no Perspectica API, hosted database, localhost service, telemetry backend, or required Codex installation.
 
-## Privacy model
+### Authentication note
 
+Login with ChatGPT is the only account path. The connection uses the community [`opencoredev/login-with-chatgpt`](https://github.com/opencoredev/login-with-chatgpt) device-flow library; it is not OpenAI's public identity product. Review that provider's terms before distributing the extension broadly.
+
+Exa is an optional research provider. When supported by the connected account and selected model, ChatGPT web search can be used instead. Neither provider creates a second Perspectica account system.
+
+## Privacy at a glance
+
+- Perspectica does not operate a server that receives your credentials, article text, or analysis history.
 - OpenAI credentials are entered only on OpenAI's authorization page.
-- Chrome asks for narrow OpenAI access from the login action, then separately asks during
-  onboarding for access to standard websites. It remembers each choice, and no persistent content
-  script is installed.
-- **Remember me on this device** is enabled by default. The refresh token is encrypted with
-  AES-256-GCM and stored in the current Chrome profile.
-- The non-exportable encryption key is stored separately in IndexedDB.
-- Access tokens are kept in `chrome.storage.session` and refreshed when needed.
-- Exa API keys are encrypted by the same local vault.
-- Article text and research queries are sent only to the providers the user selects.
-- Perspectica does not operate a server that receives credentials, article text, or analysis
-  history.
+- Article access is granted separately in Chrome and is not implemented as a permanent content script that reads every page.
+- Remembered ChatGPT and Exa credentials are encrypted and kept in the current Chrome profile.
+- Article text and research queries are sent only to the providers you choose for the requested analysis.
 
-Deleting the Chrome profile, clearing extension data, or uninstalling the extension removes the
-local vault. Disconnecting ChatGPT removes the remembered session immediately.
+Read the full [privacy notice](docs/privacy.md) before using a development build with personal browsing data.
 
-The ChatGPT connection uses the experimental community
-[`opencoredev/login-with-chatgpt`](https://github.com/opencoredev/login-with-chatgpt) device
-flow. It is not OpenAI's public identity product. Review the provider's terms before distributing
-or using the extension broadly.
+## Try the extension locally
 
-## Project structure
+Prerequisites:
 
-```text
-apps/extension/        WXT Manifest V3 extension, side panel, background and offscreen runtime
-packages/contracts/    shared Zod wire contracts, budgets, events and evidence graph types
-packages/extraction/   page-to-article extraction and deterministic ArticleIndex construction
-packages/intelligence/ Article Lens, adaptive planning, retrieval coordination and report projection
-docs/                   current architecture, privacy, release and product notes
-```
-
-The implemented V2 runtime is documented in [`docs/architecture-v2.md`](docs/architecture-v2.md).
-Older planning notes under `docs/plans/` are historical and are not production architecture.
-
-## Prerequisites
-
-- Node.js 22 or newer
-- pnpm 9.15.4 or newer
-- Chrome or another Chromium browser with the Side Panel and Offscreen APIs
-
-## Develop
+- Node.js 22 or newer;
+- pnpm 9.15.4 or newer;
+- Chrome or another Chromium browser with Side Panel and Offscreen APIs.
 
 ```bash
 pnpm install
 pnpm dev
 ```
 
-For live development, load this directory once from `chrome://extensions`:
-
-```text
-apps/extension/.output/chrome-mv3-dev
-```
-
-Keep `pnpm dev` running whenever that developer extension is enabled. WXT watches the source tree,
-serves its development modules on `localhost:3001`, and reloads supported extension contexts in
-the existing Chrome profile. Stopping the command also stops the modules used by the development
-build.
-
-The self-contained production directory is deliberately separate:
-
-```text
-apps/extension/.output/chrome-mv3
-```
-
-It is refreshed by `pnpm build`, works without a local server, and is the right directory for
-stable manual testing. Reload its extension card in `chrome://extensions` after rebuilding. The
-release ZIP is only for Chrome Web Store upload and does not need to be unpacked during
-development.
-
-No environment file is required for the extension. Exa keys are entered in onboarding and saved
-only in that Chrome profile.
-
-## Build and load unpacked
+For live development, load `apps/extension/.output/chrome-mv3-dev` from `chrome://extensions` while `pnpm dev` is running. For a self-contained build:
 
 ```bash
 pnpm build
 ```
 
-Open `chrome://extensions`, enable Developer mode, select **Load unpacked**, and choose:
-
-```text
-apps/extension/.output/chrome-mv3
-```
-
-Every `pnpm build` and `pnpm package:extension` refreshes this same unpacked directory before
-creating release artifacts.
-
-To create the Chrome Web Store ZIP:
+Then load `apps/extension/.output/chrome-mv3` as an unpacked extension. To create the Chrome Web Store ZIP:
 
 ```bash
 pnpm package:extension
 ```
 
-See [`docs/public-deployment.md`](docs/public-deployment.md) for the store checklist and
-[`docs/privacy.md`](docs/privacy.md) for the reader-facing privacy disclosure.
+No environment file is required for the extension. Exa keys are entered during onboarding and stored only in that Chrome profile.
 
-## Analysis architecture
+## For developers
 
-V2 builds one compact `ArticleIndex`, creates an adaptive `AnalysisPlan`, and runs a global
-`RetrievalCoordinator` against a shared source ledger and evidence graph. Fast, balanced, and deep
-modes change passage, mission, concurrency, deadline, and output budgets. Providers return
-candidate sources only; a bounded adjudication step maps exact candidate IDs to article claims and
-relationships, and centralized validation is required before an assertion can serve any report
-section. The side panel only projects validated ledger assertions.
+The V2 runtime builds one compact `ArticleIndex`, creates an adaptive `AnalysisPlan`, and coordinates retrieval through a shared source ledger and evidence graph. Providers return candidate sources; bounded adjudication maps those candidates to article claims, and centralized validation is required before an assertion is shown in the report.
 
-Exa uses bounded search requests with returned text/highlights. Native ChatGPT web search is one
-bounded global search workflow: its URL-attributed results are `search-summary` evidence and are
-never treated as page transcripts or quoteable excerpts. Login with ChatGPT remains the sole
-account/authentication path; Exa is an optional research provider key, not a second account system.
-
-## Optional calibration tooling
-
-The political-spectrum calibration scripts are development tools, not extension runtime
-dependencies. To rebuild local research data, place an Exa key in an ignored root `.env.local`:
-
-```dotenv
-EXA_API_KEY=your_key
+```text
+Active article -> ArticleIndex -> AnalysisPlan -> retrieval -> evidence ledger
+                                                        |
+                                                        v
+                                                   side panel report
 ```
 
-Then use the `dataset:spectrum:*` scripts documented in
-[`datasets/political-spectrum/README.md`](datasets/political-spectrum/README.md). Raw article
-corpora remain untracked because they may contain third-party text.
+Project structure:
 
-## Verify
+```text
+apps/extension/        WXT Manifest V3 extension and side panel
+packages/contracts/    shared wire contracts and evidence types
+packages/extraction/   article extraction and ArticleIndex construction
+packages/intelligence/ planning, retrieval, validation, and report projection
+docs/                   architecture, privacy, deployment, and project notes
+```
+
+Run the repository checks with:
 
 ```bash
 pnpm verify
@@ -169,6 +103,18 @@ pnpm verify:release
 pnpm audit --prod --audit-level=high
 ```
 
+## Documentation and team
+
+Start with [`docs/README.md`](docs/README.md), then read [`docs/architecture-v2.md`](docs/architecture-v2.md) for the implemented runtime, [`docs/privacy.md`](docs/privacy.md) for the reader-facing disclosure, and [`docs/public-deployment.md`](docs/public-deployment.md) for the release checklist.
+
+Perspectica was created by:
+
+- **Austin Morgan** — developer and AI orchestration;
+- **Lathik Ram C.** — concept lead, UI design, and outreach;
+- **Mathew Estis** — developer and project coordination;
+- **Jordan Allen** — brand design and QA testing.
+
 ## License
 
 Perspectica is released under the [MIT License](LICENSE).
+
